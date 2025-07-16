@@ -53,6 +53,19 @@ def SimplifyParsers : Pass<"p4hir-simplify-parsers"> {
 }
 
 //===----------------------------------------------------------------------===//
+// SimplifySelect
+//===----------------------------------------------------------------------===//
+
+def SimplifySelect : Pass<"p4hir-simplify-select"> {
+  let summary = "Simplifies select statements";
+  let description = [{
+    TODO description
+  }];
+  let constructor = "P4MLIR::createSimplifySelectPass()";
+  let dependentDialects = ["P4MLIR::P4HIR::P4HIRDialect"];
+}
+
+//===----------------------------------------------------------------------===//
 // FlattenCFG
 //===----------------------------------------------------------------------===//
 
