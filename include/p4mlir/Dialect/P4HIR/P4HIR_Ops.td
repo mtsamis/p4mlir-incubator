@@ -537,6 +537,7 @@ def ScopeOp : P4HIR_Op<"scope", [
   let regions = (region AnyRegion:$scopeRegion);
 
   let hasVerifier = 1;
+  let hasCanonicalizeMethod = 1;
   let skipDefaultBuilders = 1;
   let assemblyFormat = [{
     (`annotations` $annotations^)? custom<OmittedTerminatorRegion>($scopeRegion) (`:` type($results)^)? attr-dict
