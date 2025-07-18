@@ -797,6 +797,98 @@ void P4HIR::IfOp::build(OpBuilder &builder, OperationState &result, Value cond, 
     elseBuilder(builder, result.location);
 }
 
+LogicalResult P4HIR::IfOp::canonicalize(P4HIR::IfOp op, PatternRewriter &rewriter) {
+    auto isEmptyRegion = [](mlir::Region &region) {
+        if (region.empty()) {
+            return true;
+        }
+
+        if (region.hasOneBlock()) {
+            auto y = dyn_cast<P4HIR::YieldOp>(region.front().front());
+            return y && y.getArgs().empty();
+        }
+
+        return false;
+    };
+
+    bool emptyThen = isEmptyRegion(op.getThenRegion());
+    bool emptyElse = isEmptyRegion(op.getElseRegion());
+
+    if (emptyThen && emptyElse) {
+        // Remove an empty if statement.
+        rewriter.eraseOp(op);
+        return success();
+    } else if (emptyElse) {
+        if (!op.getElseRegion().empty()) {
+            // Remove an empty else branch.
+            auto newIfOp = rewriter.cloneWithoutRegions(op);
+
+            newIfOp->removeAttr(newIfOp.getElseAnnotationsAttrName());
+            rewriter.inlineRegionBefore(op.getThenRegion(), newIfOp.getThenRegion(),
+                                        newIfOp.getThenRegion().begin());
+            rewriter.eraseOp(op);
+
+            return success();
+        }
+    } else if (emptyThen) {
+        // if (c) then {} else B -> if (!c) then B
+        Value invertedCond = rewriter.createOrFold<P4HIR::UnaryOp>(op.getOperand().getLoc(), P4HIR::UnaryOpKind::LNot, op.getOperand());
+
+        auto newIfOp = rewriter.cloneWithoutRegions(op);
+
+        rewriter.startOpModification(newIfOp);
+        newIfOp.getConditionMutable().assign(invertedCond);
+
+        if (auto ann = op.getElseAnnotations(); ann && !ann->empty()) {
+            newIfOp->setAttr(newIfOp.getThenAnnotationsAttrName(), *ann);
+        } else {
+            newIfOp->removeAttr(newIfOp.getThenAnnotationsAttrName());
+        }
+
+        newIfOp->removeAttr(newIfOp.getElseAnnotationsAttrName());
+        rewriter.finalizeOpModification(newIfOp);
+        rewriter.inlineRegionBefore(op.getElseRegion(), newIfOp.getThenRegion(),
+                                    newIfOp.getThenRegion().begin());
+        rewriter.eraseOp(op);
+
+        return success();
+    } else {
+        P4HIR::UnaryOp condStmt = op.getCondition().getDefiningOp<P4HIR::UnaryOp>();
+
+        if (condStmt && condStmt.getKind() == P4HIR::UnaryOpKind::LNot) {
+            // if (!c) then A else B -> if (c) then B else A
+            auto newIfOp = rewriter.cloneWithoutRegions(op);
+
+            rewriter.startOpModification(newIfOp);
+            newIfOp.getConditionMutable().assign(condStmt.getInput());
+
+            if (auto ann = op.getThenAnnotations(); ann && !ann->empty()) {
+                newIfOp->setAttr(newIfOp.getElseAnnotationsAttrName(), *ann);
+            } else {
+                newIfOp->removeAttr(newIfOp.getElseAnnotationsAttrName());
+            }
+
+            if (auto ann = op.getElseAnnotations(); ann && !ann->empty()) {
+                newIfOp->setAttr(newIfOp.getThenAnnotationsAttrName(), *ann);
+            } else {
+                newIfOp->removeAttr(newIfOp.getThenAnnotationsAttrName());
+            }
+
+            rewriter.finalizeOpModification(newIfOp);
+
+            rewriter.inlineRegionBefore(op.getThenRegion(), newIfOp.getElseRegion(),
+                                        newIfOp.getElseRegion().begin());
+            rewriter.inlineRegionBefore(op.getElseRegion(), newIfOp.getThenRegion(),
+                                        newIfOp.getThenRegion().begin());
+            rewriter.eraseOp(op);
+
+            return success();
+        }
+    }
+
+    return failure();
+}
+
 mlir::LogicalResult P4HIR::ReturnOp::verify() {
     // Returns can be present in multiple different scopes, get the wrapping
     // function and start from there.
