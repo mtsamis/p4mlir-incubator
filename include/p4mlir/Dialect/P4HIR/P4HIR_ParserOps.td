@@ -148,29 +148,31 @@ def ParserTransitionSelectOp : P4HIR_Op<"transition_select",
   }];
   // FIXME: Implement verifier for cases
 
- let extraClassDeclaration = [{
-   /// Returns all select cases
-   auto selects() { return getBody().back().getOps<ParserSelectCaseOp>(); }
+  let extraClassDeclaration = [{
+    /// Returns all select cases
+    auto selects() { return getBody().back().getOps<ParserSelectCaseOp>(); }
 
-   /// Iterator adaptor that extracts ParserStateOp
-   class StateIterator final
-    : public llvm::mapped_iterator_base<StateIterator,
-                                        mlir::Block::op_iterator<ParserSelectCaseOp>, ParserStateOp> {
-   public:
-     using BaseT::BaseT;
+    /// Iterator adaptor that extracts ParserStateOp
+    class StateIterator final
+     : public llvm::mapped_iterator_base<StateIterator,
+                                         mlir::Block::op_iterator<ParserSelectCaseOp>, ParserStateOp> {
+    public:
+      using BaseT::BaseT;
 
-     /// Map the SelectCaseOp to the iterator result type.
-     ParserStateOp mapElement(ParserSelectCaseOp op) const;
-   };
+      /// Map the SelectCaseOp to the iterator result type.
+      ParserStateOp mapElement(ParserSelectCaseOp op) const;
+    };
 
-   using StateRange = mlir::iterator_range<StateIterator>;
+    using StateRange = mlir::iterator_range<StateIterator>;
 
-   /// Returns all states the given transition_select could transition to.
-   StateRange getNextStates() {
-     auto selectCases = selects();
-     return { StateIterator(selectCases.begin()), StateIterator(selectCases.end()) };
-   }
- }];
+    /// Returns all states the given transition_select could transition to.
+    StateRange getNextStates() {
+      auto selectCases = selects();
+      return { StateIterator(selectCases.begin()), StateIterator(selectCases.end()) };
+    }
+  }];
+
+  let hasCanonicalizeMethod = 1;
 }
 
 def ParserSelectCaseOp : P4HIR_Op<"select_case",
@@ -182,6 +184,11 @@ def ParserSelectCaseOp : P4HIR_Op<"select_case",
   let assemblyFormat = [{
      $key `to` $state attr-dict
   }];
+
+  let extraClassDeclaration = [{
+    bool isDefaultCase();
+  }];
+
   // TBD: check region
   let hasVerifier = 0;
 

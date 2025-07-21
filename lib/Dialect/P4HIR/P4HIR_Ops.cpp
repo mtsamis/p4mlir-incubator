@@ -1768,6 +1768,44 @@ P4HIR::ParserStateOp P4HIR::ParserTransitionSelectOp::StateIterator::mapElement(
     return lookupParserState(op.getOperation(), op.getStateAttr());
 }
 
+bool P4HIR::ParserSelectCaseOp::isDefaultCase() {
+    auto caseYieldOp = mlir::cast<P4HIR::YieldOp>(getRegion().back().getTerminator());
+    return mlir::isa<P4HIR::UniversalSetOp>(caseYieldOp.getArgs()[0].getDefiningOp());
+}
+
+//===----------------------------------------------------------------------===//
+// ParserTransitionSelectOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult P4HIR::ParserTransitionSelectOp::canonicalize(P4HIR::ParserTransitionSelectOp op, PatternRewriter &rewriter) {
+    mlir::Block *body = &op.getBody().back();
+    auto selectCases = op.selects();
+    auto it = llvm::find_if(selectCases, [](ParserSelectCaseOp op) { return op.isDefaultCase(); });
+
+    // No default case found.
+    if (it == selectCases.end()) {
+        return mlir::failure();
+    }
+
+    LogicalResult result = mlir::failure();
+
+    // Remove unreachable cases after last default case.
+    if (it != --selectCases.end()) {
+        mlir::Block *unreachableCases = rewriter.splitBlock(body, ++Block::iterator(*it));
+        rewriter.eraseBlock(unreachableCases);
+        result = mlir::success();
+    }
+
+    // Replace select with single default case with direct transition.
+    if (body->getOperations().size() == 1) {
+        auto firstCase = *op.selects().begin();
+        rewriter.replaceOpWithNewOp<P4HIR::ParserTransitionOp>(op, firstCase.getState());
+        result = mlir::success();
+    }
+
+    return result;
+}
+
 //===----------------------------------------------------------------------===//
 // SetOp
 //===----------------------------------------------------------------------===//
