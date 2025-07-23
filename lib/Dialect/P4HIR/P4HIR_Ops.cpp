@@ -543,6 +543,38 @@ LogicalResult P4HIR::ScopeOp::verify() {
         return emitOpError() << "last block of p4hir.scope must be terminated";
     return success();
 }
+
+static void replaceOpWithRegion(RewriterBase &rewriter, Operation *op,
+                                Region &region) {
+  assert(llvm::hasSingleElement(region) && "expected single-region block");
+  Block *block = &region.front();
+  Operation *terminator = block->getTerminator();
+  ValueRange results = terminator->getOperands();
+  rewriter.inlineBlockBefore(block, op, /*blockArgs=*/{});
+  rewriter.replaceOp(op, results);
+  rewriter.eraseOp(terminator);
+}
+
+LogicalResult P4HIR::ScopeOp::canonicalize(P4HIR::ScopeOp op, PatternRewriter &rewriter) {
+    if (op.getAnnotations()) {
+        return failure();
+    }
+
+    if (op.isEmpty()) {
+        rewriter.eraseOp(op);
+        return success();
+    }
+
+    auto &region = op.getScopeRegion();
+
+    if (region.hasOneBlock() && region.getOps<P4HIR::VariableOp>().empty()) {
+        replaceOpWithRegion(rewriter, op, region);
+        return success();
+    }
+
+    return failure();
+}
+
 //===----------------------------------------------------------------------===//
 // Custom Parsers & Printers
 //===----------------------------------------------------------------------===//
