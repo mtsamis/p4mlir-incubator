@@ -1771,7 +1771,7 @@ bool P4HIR::ParserSelectCaseOp::isDefault() {
 }
 
 mlir::ValueRange P4HIR::ParserSelectCaseOp::getSelectKeys() {
-    auto yield = mlir::cast<YieldOp>(getRegion().front().getTerminator());
+    auto yield = mlir::cast<YieldOp>(getTerminator());
     return yield.getArgs();
 }
 
