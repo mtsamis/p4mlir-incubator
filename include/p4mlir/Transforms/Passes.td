@@ -79,6 +79,9 @@ def SimplifySelect : Pass<"p4hir-simplify-select"> {
         (1, false, 8w1, true): accept;
         ...
       }
+
+    - replace-bool
+    Replace bool arguments with bit<1> by inserting appropriate casts.
   }];
 
   let constructor = "P4MLIR::createSimplifySelectPass()";
@@ -87,6 +90,8 @@ def SimplifySelect : Pass<"p4hir-simplify-select"> {
   let options = [
     Option<"flattenTuples", "flatten-tuples", "bool", /*default=*/"true",
            "Flatten tuples found in select arguments and keyset expressions">,
+    Option<"replaceBools", "replace-bools", "bool", /*default=*/"true",
+           "Replace bool arguments with bit<1> by inserting appropriate casts">,
   ];
 }
 
