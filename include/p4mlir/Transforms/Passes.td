@@ -141,4 +141,13 @@ def RemoveAliases : Pass<"p4hir-remove-aliases", "mlir::ModuleOp"> {
   let dependentDialects = ["P4MLIR::P4HIR::P4HIRDialect"];
 }
 
+def InlineSubparsers : Pass<"p4hir-inline-subparsers", "mlir::ModuleOp"> {
+  let summary = "Inline subparser calls";
+  let description = [{
+    Inline subparser calls.
+  }];
+  let constructor = "P4MLIR::createInlineSubparsersPass()";
+  let dependentDialects = ["P4MLIR::P4HIR::P4HIRDialect"];
+}
+
 #endif // P4MLIR_TRANSFORMS_PASSES_TD
