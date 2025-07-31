@@ -15,6 +15,7 @@ add_mlir_dialect_library(P4MLIRTransforms
   CopyInCopyOutElimination.cpp
   TupleToStruct.cpp
   ExpandEmit.cpp
+  SelectFlattenTuples.cpp
   SymbolDCE.cpp
 
   ADDITIONAL_HEADER_DIRS
