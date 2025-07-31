@@ -57,6 +57,35 @@ def SimplifyParsers : Pass<"p4hir-simplify-parsers"> {
 }
 
 //===----------------------------------------------------------------------===//
+// SelectFlattenTuples
+//===----------------------------------------------------------------------===//
+
+def SelectFlattenTuples : Pass<"p4hir-select-flatten-tuples", "P4HIR::ParserOp"> {
+  let summary = "Flatten tuples in transition select statements";
+  let description = [{
+    Fully flatten tuples in select arguments and keysets.
+    Example:
+
+    Before:
+      bit<8> x; bool y;
+      transition select(x, {y}, {x * 3, {y}}) {
+        (1, {false}, {8w1, {true}}): accept;
+        ...
+      }
+
+    After:
+      bit<8> x; bool y;
+      transition select(x, y, x * 3, y) {
+        (1, false, 8w1, true): accept;
+        ...
+      }
+  }];
+
+  let constructor = "P4MLIR::createSelectFlattenTuplesPass()";
+  let dependentDialects = ["P4MLIR::P4HIR::P4HIRDialect"];
+}
+
+//===----------------------------------------------------------------------===//
 // FlattenCFG
 //===----------------------------------------------------------------------===//
 
