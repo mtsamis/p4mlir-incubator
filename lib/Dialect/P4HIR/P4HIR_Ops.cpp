@@ -2579,8 +2579,48 @@ bool P4HIR::ParserSelectCaseOp::isDefault() {
 }
 
 mlir::ValueRange P4HIR::ParserSelectCaseOp::getSelectKeys() {
-    auto yield = mlir::cast<YieldOp>(getRegion().front().getTerminator());
-    return yield.getArgs();
+    return mlir::cast<YieldOp>(getTerminator()).getArgs();
+}
+
+//===----------------------------------------------------------------------===//
+// ParserTransitionSelectOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult P4HIR::ParserTransitionSelectOp::canonicalize(P4HIR::ParserTransitionSelectOp op,
+                                                            PatternRewriter &rewriter) {
+    auto selectCases = llvm::to_vector(op.selects());
+    auto it = llvm::find_if(selectCases, [](auto op) { return op.isDefault(); });
+    if (it == selectCases.end()) return failure();
+
+    // Remove unreachable cases after last default case.
+    auto nextCase = std::next(it);
+    if (nextCase != selectCases.end()) {
+        mlir::Block *unreachableCases =
+            rewriter.splitBlock(&op.getBody().back(), Block::iterator(*nextCase));
+        rewriter.eraseBlock(unreachableCases);
+        return success();
+    }
+
+    // Replace select with single default case with direct transition.
+    if (selectCases.size() == 1) {
+        rewriter.replaceOpWithNewOp<P4HIR::ParserTransitionOp>(op, selectCases[0].getState());
+        return success();
+    }
+
+    // Canonicalize tuple of universal sets to single universal set.
+    auto defaultYield = mlir::cast<P4HIR::YieldOp>(selectCases.back().getTerminator());
+    if (defaultYield.getArgs().size() > 1) {
+        rewriter.modifyOpInPlace(defaultYield, [&]() {
+            auto universalSetAttr = P4HIR::UniversalSetAttr::get(rewriter.getContext());
+            auto universalSet =
+                rewriter.create<P4HIR::ConstOp>(defaultYield.getLoc(), universalSetAttr);
+            defaultYield.getArgsMutable().assign(universalSet);
+        });
+
+        return success();
+    }
+
+    return failure();
 }
 
 //===----------------------------------------------------------------------===//
