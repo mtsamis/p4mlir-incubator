@@ -1580,6 +1580,15 @@ P4HIR::ParserStateOp P4HIR::ParserOp::getStartState() {
     return lookupParserState(getOperation(), transition.getStateAttr());
 }
 
+mlir::SymbolRefAttr P4HIR::ParserStateOp::getSymbolRef() {
+    auto parser = getOperation()->getParentOfType<P4HIR::ParserOp>();
+    auto stateAttr = mlir::StringAttr::get(getContext(), getSymName());
+    auto parserAttr = mlir::StringAttr::get(getContext(), parser.getSymName());
+    auto leafSymbol = mlir::SymbolRefAttr::get(stateAttr);
+    auto symbol = mlir::SymbolRefAttr::get(parserAttr, {leafSymbol});
+    return symbol;
+}
+
 P4HIR::ParserStateOp::StateRange P4HIR::ParserStateOp::getNextStates() {
     auto &block = getBody().back();
 
@@ -2306,6 +2315,18 @@ LogicalResult P4HIR::ApplyOp::verifySymbolUses(SymbolTableCollection &symbolTabl
     }
 
     return success();
+}
+
+bool P4HIR::ApplyOp::isSubparserCall() {
+    auto mod = getParentModule(*this);
+    auto state = getOperation()->getParentOfType<P4HIR::ParserStateOp>();
+    auto instOp = mod.lookupSymbol<P4HIR::InstantiateOp>(getCallee());
+    if (!state || !instOp) return false;
+
+    auto calleeParser = mod.lookupSymbol<P4HIR::ParserOp>(instOp.getCallee());
+    if (!calleeParser) return false;
+
+    return true;
 }
 
 //===----------------------------------------------------------------------===//

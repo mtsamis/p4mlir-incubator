@@ -72,6 +72,9 @@ def ParserStateOp : P4HIR_Op<"state",
     ///  - Select transition (TransitionSelectOp)
     auto getNextTransition() { return getBody().back().getTerminator(); }
 
+    /// Get a SymbolRefAttr for this parser state.
+    mlir::SymbolRefAttr getSymbolRef();
+
     /// Checks if this state accepts the packet
     bool isAccept() {
       return mlir::isa<ParserAcceptOp>(getNextTransition());

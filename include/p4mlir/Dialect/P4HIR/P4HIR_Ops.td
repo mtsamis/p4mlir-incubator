@@ -1370,6 +1370,8 @@ def ApplyOp : P4HIR_Op<"apply",
     void setCalleeFromCallable(mlir::CallInterfaceCallable callee) {
       (*this)->setAttr("callee", callee.get<mlir::SymbolRefAttr>());
     }
+
+    bool isSubparserCall();
   }];
 
   let assemblyFormat = [{
