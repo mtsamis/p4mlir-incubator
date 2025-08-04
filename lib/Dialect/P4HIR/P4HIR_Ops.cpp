@@ -238,6 +238,43 @@ void P4HIR::ReadOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
 // UnaryOp
 //===----------------------------------------------------------------------===//
 
+static P4HIR::UnaryOp getDefiningUnop(P4HIR::UnaryOpKind kind, const mlir::Value &val) {
+    if (auto unop = val.getDefiningOp<P4HIR::UnaryOp>())
+        if (unop.getKind() == kind) return unop;
+    return {};
+}
+
+static P4HIR::BinOp getDefiningBinop(P4HIR::BinOpKind kind, const mlir::Value &val) {
+    if (auto binop = val.getDefiningOp<P4HIR::BinOp>())
+        if (binop.getKind() == kind) return binop;
+    return {};
+}
+
+static bool isConstantInt(mlir::Attribute attr, int64_t val) {
+    if (auto intAttr = mlir::dyn_cast_if_present<P4HIR::IntAttr>(attr)) {
+        llvm::APInt intVal = intAttr.getValue();
+        return intVal == llvm::APInt(intVal.getBitWidth(), val, true);
+    }
+    return false;
+}
+
+static mlir::Attribute getConstantInt(mlir::Type type, int64_t val) {
+    if (auto intType = mlir::dyn_cast<P4HIR::BitsType>(type))
+        return P4HIR::IntAttr::get(type, llvm::APInt(intType.getWidth(), val, true));
+    return {};
+}
+
+static bool isSignedIntegerType(const mlir::Type type) {
+    if (const auto bitsType = dyn_cast<P4HIR::BitsType>(type)) {
+        return bitsType.isSigned();
+    }
+    if (mlir::isa<P4HIR::InfIntType>(type)) {
+        // InfIntType is always considered a signed integer type
+        return true;
+    }
+    return false;
+}
+
 LogicalResult P4HIR::UnaryOp::verify() {
     switch (getKind()) {
         case P4HIR::UnaryOpKind::Neg:
@@ -256,32 +293,30 @@ void P4HIR::UnaryOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
 }
 
 OpFoldResult P4HIR::UnaryOp::fold(FoldAdaptor adaptor) {
-    // Identity.
-    // plus(%x) -> %x
-    if (getKind() == P4HIR::UnaryOpKind::UPlus) return getInput();
+    P4HIR::UnaryOpKind kind = getKind();
 
-    // Double negation.
-    if (auto inputOp = mlir::dyn_cast_if_present<UnaryOp>(getInput().getDefiningOp())) {
-        if (getKind() == inputOp.getKind()) {
-            if (getKind() == P4HIR::UnaryOpKind::LNot ||  // not(not(%a)) -> %a
-                getKind() == P4HIR::UnaryOpKind::Cmpl ||  // compl(compl(%a)) -> %a
-                getKind() == P4HIR::UnaryOpKind::Neg) {   // neg(neg(%a)) -> %a
-                return inputOp.getInput();
-            }
-        }
-    }
+    // Identity.
+    // plus(x) -> x
+    if (kind == P4HIR::UnaryOpKind::UPlus) return getInput();
+
+    bool isIdempotent = (kind == P4HIR::UnaryOpKind::LNot) || (kind == P4HIR::UnaryOpKind::Cmpl) ||
+                        (kind == P4HIR::UnaryOpKind::Neg);
+
+    // OP(OP(x)) = x
+    if (isIdempotent)
+        if (auto inputOp = getDefiningUnop(kind, getInput())) return inputOp.getInput();
 
     // Constant folding
     if (auto opAttr = adaptor.getInput()) {
-        if (getKind() == P4HIR::UnaryOpKind::LNot) {
+        if (kind == P4HIR::UnaryOpKind::LNot) {
             if (auto boolAttr = mlir::dyn_cast<P4HIR::BoolAttr>(opAttr)) {
                 return P4HIR::BoolAttr::get(getContext(), !boolAttr.getValue());
             }
-        } else if (getKind() == P4HIR::UnaryOpKind::Neg) {
+        } else if (kind == P4HIR::UnaryOpKind::Neg) {
             if (auto intAttr = mlir::dyn_cast<P4HIR::IntAttr>(opAttr)) {
                 return P4HIR::IntAttr::get(intAttr.getType(), -intAttr.getValue());
             }
-        } else if (getKind() == P4HIR::UnaryOpKind::Cmpl) {
+        } else if (kind == P4HIR::UnaryOpKind::Cmpl) {
             if (auto intAttr = mlir::dyn_cast<P4HIR::IntAttr>(opAttr)) {
                 return P4HIR::IntAttr::get(intAttr.getType(), ~intAttr.getValue());
             }
@@ -298,6 +333,176 @@ OpFoldResult P4HIR::UnaryOp::fold(FoldAdaptor adaptor) {
 
 void P4HIR::BinOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
     setNameFn(getResult(), stringifyEnum(getKind()));
+}
+
+static void sortCommutativeArgs(Operation *op, ArrayRef<Attribute> operands) {
+    assert(op->getNumOperands() == 2);
+
+    OpOperand *operandsBegin = op->getOpOperands().begin();
+    auto isNonConstant = [&](OpOperand &o) {
+        return !static_cast<bool>(operands[std::distance(operandsBegin, &o)]);
+    };
+    auto *firstConstantIt = llvm::find_if_not(op->getOpOperands(), isNonConstant);
+    std::stable_partition(firstConstantIt, op->getOpOperands().end(), isNonConstant);
+}
+
+template <class AttrT, class Func>
+static Attribute constFoldBinOp(ArrayRef<Attribute> operands, Type resultType, Func &&calculate) {
+    assert(operands.size() == 2 && "binary op takes two operands");
+
+    if (!resultType || !operands[0] || !operands[1]) return {};
+
+    if (isa<AttrT>(operands[0]) && isa<AttrT>(operands[1])) {
+        auto lhs = cast<AttrT>(operands[0]);
+        auto rhs = cast<AttrT>(operands[1]);
+        if (lhs.getType() != rhs.getType()) return {};
+
+        auto calRes = calculate(lhs.getValue(), rhs.getValue());
+        return AttrT::get(resultType, calRes);
+    }
+
+    return {};
+}
+
+OpFoldResult P4HIR::BinOp::fold(FoldAdaptor adaptor) {
+    P4HIR::BinOpKind kind = getKind();
+
+    bool isCommutative = (kind == P4HIR::BinOpKind::Add) || (kind == P4HIR::BinOpKind::AddSat) ||
+                         (kind == P4HIR::BinOpKind::Sub) || (kind == P4HIR::BinOpKind::SubSat) ||
+                         (kind == P4HIR::BinOpKind::And) || (kind == P4HIR::BinOpKind::Or) ||
+                         (kind == P4HIR::BinOpKind::Xor);
+
+    if (isCommutative) sortCommutativeArgs(getOperation(), adaptor.getOperands());
+
+    auto foldIntBinop = [&](auto binop) {
+        return constFoldBinOp<P4HIR::IntAttr>(adaptor.getOperands(), getType(), binop);
+    };
+
+    if (kind == P4HIR::BinOpKind::Add) {
+        // addi(a, 0) -> a
+        if (isConstantInt(adaptor.getRhs(), 0)) return getLhs();
+
+        // addi(subi(a, b), b) -> a
+        if (auto sub = getDefiningBinop(P4HIR::BinOpKind::Sub, getLhs()))
+            if (getRhs() == sub.getRhs()) return sub.getLhs();
+
+        // addi(b, subi(a, b)) -> a
+        if (auto sub = getDefiningBinop(P4HIR::BinOpKind::Sub, getRhs()))
+            if (getLhs() == sub.getRhs()) return sub.getLhs();
+
+        return foldIntBinop(std::plus<llvm::APInt>{});
+    } else if (kind == P4HIR::BinOpKind::Sub) {
+        // subi(a, 0) -> a
+        if (isConstantInt(adaptor.getRhs(), 0)) return getLhs();
+
+        if (auto add = getDefiningBinop(P4HIR::BinOpKind::Add, getLhs())) {
+            // subi(addi(a, b), b) -> a
+            if (getRhs() == add.getRhs()) return add.getLhs();
+
+            // subi(addi(a, b), a) -> b
+            if (getRhs() == add.getLhs()) return add.getRhs();
+        }
+
+        return foldIntBinop(std::minus<llvm::APInt>{});
+    } else if (kind == P4HIR::BinOpKind::AddSat || kind == P4HIR::BinOpKind::SubSat) {
+        // OP(a, 0) -> 0
+        if (isConstantInt(adaptor.getLhs(), 0)) return getLhs();
+    } else if (kind == P4HIR::BinOpKind::Mul) {
+        // mul(a, 1) -> a
+        if (isConstantInt(adaptor.getRhs(), 1)) return getLhs();
+
+        // mul(a, 0) -> 0
+        if (isConstantInt(adaptor.getRhs(), 0)) return getConstantInt(getType(), 0);
+
+        return foldIntBinop(std::multiplies<llvm::APInt>{});
+    } else if (kind == P4HIR::BinOpKind::Div || kind == P4HIR::BinOpKind::Mod) {
+        // OP(a, 1) -> a
+        if (isConstantInt(adaptor.getRhs(), 1)) return getLhs();
+
+        // OP(0, a) -> 0
+        if (isConstantInt(adaptor.getLhs(), 1)) return getConstantInt(getType(), 0);
+
+        return foldIntBinop([&](const auto &a, const auto &b) {
+            if (kind == P4HIR::BinOpKind::Div) {
+                if (isSignedIntegerType(getType()))
+                    return a.sdiv(b);
+                else
+                    return a.udiv(b);
+            } else {
+                if (isSignedIntegerType(getType()))
+                    return a.srem(b);
+                else
+                    return a.urem(b);
+            }
+        });
+    } else if (kind == P4HIR::BinOpKind::And || kind == P4HIR::BinOpKind::Or) {
+        int64_t neutralVal = (kind == P4HIR::BinOpKind::And) ? int64_t(-1) : int64_t(0);
+        int64_t absorbVal = (kind == P4HIR::BinOpKind::And) ? int64_t(0) : int64_t(-1);
+
+        // OP(a, neutralVal) -> a
+        if (isConstantInt(adaptor.getRhs(), neutralVal)) return getLhs();
+
+        /// OP(a, absorbVal) -> absorbVal
+        if (isConstantInt(adaptor.getRhs(), absorbVal)) return getConstantInt(getType(), absorbVal);
+
+        /// OP(a, a) -> a
+        if (getLhs() == getRhs()) return getLhs();
+
+        /// OP(OP(x, a), a) -> OP(x, a)
+        /// OP(OP(a, x), a) -> OP(a, x)
+        if (auto nested = getDefiningBinop(kind, getLhs()))
+            if (nested.getLhs() == getRhs() || nested.getRhs() == getRhs()) return getLhs();
+
+        /// OP(a, OP(x, a)) -> OP(x, a)
+        /// OP(a, OP(a, x)) -> OP(a, x)
+        if (auto nested = getDefiningBinop(kind, getRhs()))
+            if (nested.getLhs() == getLhs() || nested.getRhs() == getLhs()) return getRhs();
+
+        /// OP(not(x), x) -> absorbVal
+        if (auto bitnot = getDefiningUnop(P4HIR::UnaryOpKind::Cmpl, getLhs()))
+            if (bitnot.getInput() == getRhs()) return getConstantInt(getType(), absorbVal);
+
+        /// OP(x, not(x)) -> absorbVal
+        if (auto bitnot = getDefiningUnop(P4HIR::UnaryOpKind::Cmpl, getRhs()))
+            if (bitnot.getInput() == getLhs()) return getConstantInt(getType(), absorbVal);
+
+        if (kind == P4HIR::BinOpKind::Div)
+            return foldIntBinop(std::bit_and<llvm::APInt>{});
+        else
+            return foldIntBinop(std::bit_or<llvm::APInt>{});
+    } else if (kind == P4HIR::BinOpKind::Xor) {
+        // xor(a, 0) -> a
+        if (isConstantInt(adaptor.getRhs(), 0)) return getLhs();
+
+        /// xor(x, x) -> 0
+        if (getLhs() == getRhs()) return getConstantInt(getType(), 0);
+
+        /// xor(xor(x, a), a) -> x
+        /// xor(xor(a, x), a) -> x
+        if (auto nested = getDefiningBinop(P4HIR::BinOpKind::Xor, getLhs())) {
+            if (nested.getRhs() == getRhs()) return nested.getLhs();
+            if (nested.getLhs() == getRhs()) return nested.getRhs();
+        }
+
+        /// xor(a, xor(x, a)) -> x
+        /// xor(a, xor(a, x)) -> x
+        if (auto nested = getDefiningBinop(P4HIR::BinOpKind::Xor, getRhs())) {
+            if (nested.getRhs() == getLhs()) return nested.getLhs();
+            if (nested.getLhs() == getLhs()) return nested.getRhs();
+        }
+
+        /// xor(not(x), x) -> 11...11
+        if (auto bitnot = getDefiningUnop(P4HIR::UnaryOpKind::Cmpl, getLhs()))
+            if (bitnot.getInput() == getRhs()) return getConstantInt(getType(), int64_t(-1));
+
+        /// xor(x, not(x)) -> 11...11
+        if (auto bitnot = getDefiningUnop(P4HIR::UnaryOpKind::Cmpl, getRhs()))
+            if (bitnot.getInput() == getLhs()) return getConstantInt(getType(), int64_t(-1));
+
+        return foldIntBinop(std::bit_xor<llvm::APInt>{});
+    }
+
+    return {};
 }
 
 //===----------------------------------------------------------------------===//
@@ -353,33 +558,13 @@ LogicalResult P4HIR::ShrOp::verify() {
     return verifyShiftOperation(getOperation(), rhsType);
 }
 
-bool isSignedIntegerType(const mlir::Type type) {
-    if (const auto bitsType = dyn_cast<P4HIR::BitsType>(type)) {
-        return bitsType.isSigned();
-    }
-    if (mlir::isa<P4HIR::InfIntType>(type)) {
-        // InfIntType is always considered a signed integer type
-        return true;
-    }
-    return false;
-}
-
 template <typename ShiftOp>
 OpFoldResult foldZeroConstants(ShiftOp op, typename ShiftOp::FoldAdaptor adaptor) {
-    // Identity.
-    // shl/shr(%x, 0) -> %x
-    if (auto rhsAttr = mlir::dyn_cast_if_present<P4HIR::IntAttr>(adaptor.getRhs())) {
-        if (rhsAttr.getValue().isZero()) return op.getLhs();
-    }
+    // shl/shr(x, 0) -> x
+    if (isConstantInt(adaptor.getRhs(), 0)) return op.getLhs();
 
-    // Zero.
     // shl/shr(0, c) -> 0
-    if (auto lhsAttr = mlir::dyn_cast_if_present<P4HIR::IntAttr>(adaptor.getLhs())) {
-        auto lhsVal = lhsAttr.getValue();
-        if (lhsVal.isZero()) {
-            return P4HIR::IntAttr::get(op.getType(), APInt::getZero(lhsVal.getBitWidth()));
-        }
-    }
+    if (isConstantInt(adaptor.getLhs(), 0)) return getConstantInt(op.getType(), 0);
 
     return {};
 }
@@ -397,7 +582,7 @@ OpFoldResult P4HIR::ShlOp::fold(FoldAdaptor adaptor) {
     // shl(%x : bit/int<W>, c) -> 0 if c >= W
     if (auto bitsType = mlir::dyn_cast<P4HIR::BitsType>(getType())) {
         unsigned width = bitsType.getWidth();
-        if (shift.uge(width)) return P4HIR::IntAttr::get(bitsType, APInt::getZero(width));
+        if (shift.uge(width)) return getConstantInt(bitsType, 0);
     }
 
     // Try unwrapping shift used to extend infint width
@@ -429,8 +614,7 @@ OpFoldResult P4HIR::ShrOp::fold(FoldAdaptor adaptor) {
     // shr(%x : bit<W>, c) -> 0 if c >= W
     if (auto bitsType = mlir::dyn_cast<P4HIR::BitsType>(getType())) {
         unsigned width = bitsType.getWidth();
-        if (bitsType.isUnsigned() && shift.uge(width))
-            return P4HIR::IntAttr::get(bitsType, APInt::getZero(width));
+        if (bitsType.isUnsigned() && shift.uge(width)) return getConstantInt(bitsType, 0);
     }
 
     // Constant folding
@@ -449,6 +633,54 @@ OpFoldResult P4HIR::ShrOp::fold(FoldAdaptor adaptor) {
 
 void P4HIR::CmpOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
     setNameFn(getResult(), stringifyEnum(getKind()));
+}
+
+OpFoldResult P4HIR::CmpOp::fold(FoldAdaptor adaptor) {
+    P4HIR::CmpOpKind kind = getKind();
+
+    // cmp(kind, x, x)
+    if (getLhs() == getRhs()) {
+        switch (kind) {
+            case P4HIR::CmpOpKind::Lt:
+            case P4HIR::CmpOpKind::Gt:
+            case P4HIR::CmpOpKind::Ne:
+                return P4HIR::BoolAttr::get(getContext(), false);
+            case P4HIR::CmpOpKind::Le:
+            case P4HIR::CmpOpKind::Ge:
+            case P4HIR::CmpOpKind::Eq:
+                return P4HIR::BoolAttr::get(getContext(), true);
+        }
+    }
+
+    // Move constant to the right side.
+    if (adaptor.getLhs() && !adaptor.getRhs()) {
+        using KindPair = std::pair<P4HIR::CmpOpKind, P4HIR::CmpOpKind>;
+        const KindPair swapKinds[] = {
+            {P4HIR::CmpOpKind::Lt, P4HIR::CmpOpKind::Gt},
+            {P4HIR::CmpOpKind::Gt, P4HIR::CmpOpKind::Lt},
+            {P4HIR::CmpOpKind::Le, P4HIR::CmpOpKind::Ge},
+            {P4HIR::CmpOpKind::Ge, P4HIR::CmpOpKind::Le},
+            {P4HIR::CmpOpKind::Eq, P4HIR::CmpOpKind::Eq},
+            {P4HIR::CmpOpKind::Ne, P4HIR::CmpOpKind::Ne},
+        };
+
+        for (auto [from, to] : swapKinds) {
+            if (kind == from) {
+                setKind(to);
+                mlir::Value lhs = getLhs();
+                mlir::Value rhs = getRhs();
+                getLhsMutable().assign(rhs);
+                getRhsMutable().assign(lhs);
+                return getResult();
+            }
+        }
+
+        llvm_unreachable("unknown cmp kind");
+    }
+
+    // TODO implement constant folding by reworking constFoldBinOp.
+
+    return {};
 }
 
 //===----------------------------------------------------------------------===//

@@ -346,6 +346,8 @@ def BinOp : P4HIR_Op<"binop", [Pure,
   let assemblyFormat = [{
     `(` $kind `,` $lhs `,` $rhs  `)` `:` type($lhs) attr-dict
   }];
+
+  let hasFolder = 1;
 }
 
 def ConcatOp : P4HIR_Op<"concat", [Pure]> {
@@ -503,6 +505,7 @@ def CmpOp : P4HIR_Op<"cmp",
 
   // Already covered by the traits
   let hasVerifier = 0;
+  let hasFolder = 1;
 }
 
 def ScopeOp : P4HIR_Op<"scope", [
