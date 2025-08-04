@@ -348,6 +348,7 @@ def BinOp : P4HIR_Op<"binop", [Pure,
   }];
 
   let hasFolder = 1;
+  let hasCanonicalizer = 1;
 }
 
 def ConcatOp : P4HIR_Op<"concat", [Pure]> {

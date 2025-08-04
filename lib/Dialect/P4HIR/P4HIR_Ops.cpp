@@ -36,6 +36,35 @@
 using namespace mlir;
 using namespace P4::P4MLIR;
 
+static P4HIR::IntAttr
+applyToIntegerAttrs(mlir::PatternRewriter &builder, mlir::Value res, mlir::TypedAttr lhs,
+                    mlir::TypedAttr rhs,
+                    llvm::function_ref<llvm::APInt(const llvm::APInt &, const llvm::APInt &)> binFn) {
+    llvm::APInt lhsVal = mlir::cast<P4HIR::IntAttr>(lhs).getValue();
+    llvm::APInt rhsVal = mlir::cast<P4HIR::IntAttr>(rhs).getValue();
+    llvm::APInt value = binFn(lhsVal, rhsVal);
+    return P4HIR::IntAttr::get(res.getType(), value);
+}
+
+static P4HIR::IntAttr addIntegerAttrs(mlir::PatternRewriter &builder, mlir::Value res,
+                                   mlir::TypedAttr lhs, mlir::TypedAttr rhs) {
+  return applyToIntegerAttrs(builder, res, lhs, rhs, std::plus<APInt>());
+}
+
+static P4HIR::IntAttr subIntegerAttrs(mlir::PatternRewriter &builder, mlir::Value res,
+                                   mlir::TypedAttr lhs, mlir::TypedAttr rhs) {
+  return applyToIntegerAttrs(builder, res, lhs, rhs, std::minus<APInt>());
+}
+
+static P4HIR::IntAttr mulIntegerAttrs(mlir::PatternRewriter &builder, mlir::Value res,
+                                   mlir::TypedAttr lhs, mlir::TypedAttr rhs) {
+  return applyToIntegerAttrs(builder, res, lhs, rhs, std::multiplies<APInt>());
+}
+
+namespace {
+#include "p4mlir/Dialect/P4HIR/P4HIR_Patterns.inc"
+} // namespace
+
 //===----------------------------------------------------------------------===//
 // ConstantOp
 //===----------------------------------------------------------------------===//
@@ -503,6 +532,10 @@ OpFoldResult P4HIR::BinOp::fold(FoldAdaptor adaptor) {
     }
 
     return {};
+}
+
+void P4HIR::BinOp::getCanonicalizationPatterns(RewritePatternSet &patterns, MLIRContext *context) {
+    patterns.add<AddIAddConstant, AddISubConstantRHS, AddISubConstantLHS>(context);
 }
 
 //===----------------------------------------------------------------------===//
