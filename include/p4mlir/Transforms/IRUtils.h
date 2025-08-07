@@ -13,18 +13,21 @@ namespace P4::P4MLIR::detail {
 class IRUtils {
  public:
     // Helper to create a new sub-state for `state` and move `ops` in it.
-    std::pair<P4HIR::ParserStateOp, mlir::Block *> createSubState(mlir::IRRewriter &rewriter,
-                                                                  P4HIR::ParserStateOp state,
-                                                                  llvm::StringRef suffix,
-                                                                  mlir::Block *ops) {
-        auto stateName = mlir::StringAttr::get(rewriter.getContext(),
-                                               llvm::Twine(state.getSymName()) + "_" + suffix);
-        auto newState = rewriter.create<P4HIR::ParserStateOp>(state.getLoc(), stateName,
-                                                              mlir::DictionaryAttr());
+    P4HIR::ParserStateOp createSubState(mlir::IRRewriter &rewriter, P4HIR::ParserStateOp state,
+                                        llvm::StringRef suffix, mlir::Block *ops = nullptr) {
+        auto parser = state->getParentOfType<P4HIR::ParserOp>();
+        std::string basename = (llvm::Twine(state.getSymName()) + "_" + suffix).str();
+        std::string name = basename;
+
+        size_t counter = 0;
+        while (parser.lookupSymbol(name)) name = basename + "_" + std::to_string(counter++);
+
+        auto newState =
+            rewriter.create<P4HIR::ParserStateOp>(state.getLoc(), name, mlir::DictionaryAttr());
         mlir::Block *newStateBB =
             rewriter.createBlock(&newState.getBody(), newState.getBody().begin());
-        rewriter.inlineBlockBefore(ops, newStateBB, newStateBB->end());
-        return std::pair(newState, newStateBB);
+        if (ops) rewriter.inlineBlockBefore(ops, newStateBB, newStateBB->end());
+        return newState;
     };
 
     // Inline `scopeOp`'s body to its parent.

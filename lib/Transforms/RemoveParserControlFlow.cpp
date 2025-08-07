@@ -39,22 +39,21 @@ struct RemoveParserControlFlowPass
         // Create "pre" and "post" states with the operations before and after the if statement.
         auto [beforeBB, ifBB, afterBB] = splitBlockAt(rewriter, &state.getBody().back(), ifOp);
         rewriter.setInsertionPointAfter(state);
-        auto [preState, preStateBB] = createSubState(rewriter, state, "pre", beforeBB);
+        auto preState = createSubState(rewriter, state, "pre", beforeBB);
         rewriter.setInsertionPointAfter(preState);
-        auto [postState, postStateBB] = createSubState(rewriter, state, "post", afterBB);
+        auto postState = createSubState(rewriter, state, "post", afterBB);
 
         // Create a "then" state and move the then region code in it.
         rewriter.setInsertionPointAfter(preState);
-        auto [thenState, thenStateBB] =
-            createSubState(rewriter, state, "then", &ifOp.getThenRegion().front());
+        auto thenState = createSubState(rewriter, state, "then", &ifOp.getThenRegion().front());
 
         // If the ifOp has an else block, then similarly create an "else" state for it.
         P4HIR::ParserStateOp elseState;
         mlir::Block *elseStateBB;
         if (!ifOp.getElseRegion().empty()) {
             rewriter.setInsertionPointAfter(thenState);
-            std::tie(elseState, elseStateBB) =
-                createSubState(rewriter, state, "else", &ifOp.getElseRegion().front());
+            elseState = createSubState(rewriter, state, "else", &ifOp.getElseRegion().front());
+            elseStateBB = elseState.getBlock();
         } else {
             // Otherwise the else state is the "post" state.
             elseState = postState;
@@ -62,7 +61,7 @@ struct RemoveParserControlFlowPass
         }
 
         // Add a (join) transition going from the "then"/"else" states to "post".
-        for (auto newStateBB : {thenStateBB, elseStateBB}) {
+        for (auto newStateBB : {thenState.getBlock(), elseStateBB}) {
             if (newStateBB) {
                 rewriter.eraseOp(newStateBB->getTerminator());
                 rewriter.setInsertionPointToEnd(newStateBB);
@@ -71,7 +70,7 @@ struct RemoveParserControlFlowPass
         }
 
         // Create a select statement that transitions to then/else base on ifOp's condition.
-        rewriter.setInsertionPointToEnd(preStateBB);
+        rewriter.setInsertionPointToEnd(preState.getBlock());
         createBoolTransitionSelect(rewriter, loc, ifOp.getCondition(), thenState, elseState);
 
         // Replace the empty if statement with a transition to the "pre" state.
@@ -82,7 +81,7 @@ struct RemoveParserControlFlowPass
 
         // Due to the splitting states, we may have values with uses in other states.
         rewriter.setInsertionPoint(parser.getStartState());
-        adjustBlockUses(rewriter, preStateBB);
+        adjustBlockUses(rewriter, preState.getBlock());
 
         return mlir::success();
     }
