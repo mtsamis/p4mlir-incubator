@@ -191,4 +191,11 @@ def RemoveParserControlFlow : Pass<"p4hir-remove-parser-control-flow", "mlir::Mo
   let dependentDialects = ["P4MLIR::P4HIR::P4HIRDialect"];
 }
 
+def InlineParsers : Pass<"p4hir-inline-parsers", "mlir::ModuleOp"> {
+  let summary = "Inline subparser calls";
+  let description = [{ Inline subparser calls where possible. }];
+  let constructor = "P4MLIR::createInlineParsersPass()";
+  let dependentDialects = ["P4MLIR::P4HIR::P4HIRDialect"];
+}
+
 #endif // P4MLIR_TRANSFORMS_PASSES_TD

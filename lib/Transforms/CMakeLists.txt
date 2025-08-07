@@ -1,6 +1,7 @@
 add_mlir_dialect_library(P4MLIRTransforms
   FlattenCFG.cpp
   IRUtils.cpp
+  InlineParsers.cpp
   PrintParsersGraph.cpp
   RemoveAliases.cpp
   RemoveParserControlFlow.cpp
