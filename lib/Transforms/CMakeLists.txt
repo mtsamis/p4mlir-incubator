@@ -4,6 +4,7 @@ add_mlir_dialect_library(P4MLIRTransforms
   PrintParsersGraph.cpp
   RemoveAliases.cpp
   RemoveParserControlFlow.cpp
+  RemoveSoftCF.cpp
   SerEnumElimination.cpp
   SimplifyParsers.cpp
 
