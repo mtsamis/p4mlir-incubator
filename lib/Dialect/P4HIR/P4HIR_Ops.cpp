@@ -798,7 +798,7 @@ mlir::LogicalResult P4HIR::ReturnOp::verify() {
     // ReturnOps currently only have a single optional operand.
     if (getNumOperands() > 1) return emitOpError() << "expects at most 1 return operand";
 
-    // Return ops may have zero arguments before SoftReturn ops are eliminated. 
+    // Return ops may have zero arguments before SoftReturn ops are eliminated.
     if (getNumOperands() == 1) {
         // Ensure returned type matches the function signature.
         auto expectedTy = mlir::cast<P4HIR::FuncType>(fnOp.getFunctionType()).getReturnType();
@@ -3133,9 +3133,11 @@ void P4HIR::ForInOp::build(
 
     OpBuilder::InsertionGuard guard(builder);
 
-    // TODO: Support different collection types
-    auto collectionType = mlir::cast<P4HIR::SetType>(collection.getType());
-    mlir::Type elementType = collectionType.getElementType();
+    mlir::Type elementType =
+        llvm::TypeSwitch<mlir::Type, mlir::Type>(collection.getType())
+            .Case<P4HIR::SetType, P4HIR::ArrayType>([](auto type) { return type.getElementType(); })
+            .Case<P4HIR::HeaderStackType>([](auto type) { return type.getArrayElementType(); })
+            .Default([](auto) { return mlir::Type{}; });
 
     Region *region = result.addRegion();
     Block *block = builder.createBlock(region);
@@ -3170,11 +3172,13 @@ ParseResult P4HIR::ForInOp::parse(mlir::OpAsmParser &parser, mlir::OperationStat
     if (parser.resolveOperand(collection, collectionType, result.operands)) return failure();
 
     // Verify that the collection type is iterable and determine element type
-    Type expectedElementType;
-    if (auto setType = mlir::dyn_cast<P4HIR::SetType>(collectionType)) {
-        expectedElementType = setType.getElementType();
-        // TODO: Add support for other collection types like arrays
-    } else {
+    mlir::Type expectedElementType =
+        llvm::TypeSwitch<mlir::Type, mlir::Type>(collectionType)
+            .Case<P4HIR::SetType, P4HIR::ArrayType>([](auto type) { return type.getElementType(); })
+            .Case<P4HIR::HeaderStackType>([](auto type) { return type.getArrayElementType(); })
+            .Default([](auto) { return mlir::Type{}; });
+
+    if (!expectedElementType) {
         return parser.emitError(loc, "expected an iterable collection type, found")
                << collectionType;
     }
