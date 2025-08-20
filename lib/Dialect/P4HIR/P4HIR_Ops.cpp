@@ -460,9 +460,18 @@ void P4HIR::VariableOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
 }
 
 LogicalResult P4HIR::VariableOp::canonicalize(P4HIR::VariableOp op, PatternRewriter &rewriter) {
+    auto firstNonAssignOp =
+        llvm::find_if(op->getUsers(), [](auto *user) { return !mlir::isa<P4HIR::AssignOp>(user); });
+
+    if (firstNonAssignOp == op->getUsers().end()) {
+        // Completely remove variable if it is only written to.
+        for (auto *user : op->getUsers()) rewriter.eraseOp(user);
+        rewriter.eraseOp(op);
+        return success();
+    }
+
     // Check if the variable has one unique assignment to it, all other
-    // uses are reads, and that all uses are in the same block as the variable
-    // itself.
+    // uses are reads, and all reads are in the same block with the write.
     P4HIR::AssignOp uniqueAssignOp;
     for (auto *user : op->getUsers()) {
         // Ensure there is at most one unique assignment to the variable.
