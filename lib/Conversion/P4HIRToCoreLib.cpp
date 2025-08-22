@@ -1,5 +1,3 @@
-#include "p4mlir/Conversion/P4HIRToCoreLib.h"
-
 #include <optional>
 
 #include "llvm/ADT/StringSwitch.h"
@@ -10,6 +8,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "p4mlir/Conversion/ConversionPatterns.h"
+#include "p4mlir/Conversion/Passes.h"
 #include "p4mlir/Dialect/P4CoreLib/P4CoreLib_Dialect.h"
 #include "p4mlir/Dialect/P4CoreLib/P4CoreLib_Ops.h"
 #include "p4mlir/Dialect/P4CoreLib/P4CoreLib_Types.h"

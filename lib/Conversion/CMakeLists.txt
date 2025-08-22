@@ -1,6 +1,8 @@
 add_mlir_dialect_library(P4MLIRConversion
   ConversionPatterns.cpp
   P4HIRToCoreLib.cpp
+  LowerP4HIRToLLVM.cpp
+  LowerP4HIRToMLIRCore.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${PROJECT_SOURCE_DIR}/include/p4mlir/Conversion
@@ -12,4 +14,12 @@ add_mlir_dialect_library(P4MLIRConversion
   MLIRIR
   MLIRSupport
   MLIRTransforms
+  MLIRLLVMCommonConversion
+  MLIRFuncToLLVM
+  MLIRMemRefDialect
+  MLIRControlFlowDialect
+  MLIRSCFDialect
+  MLIRBuiltinToLLVMIRTranslation
+  MLIRMemRefToLLVM
+  MLIRSCFToControlFlow
 )

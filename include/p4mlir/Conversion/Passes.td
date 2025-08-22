@@ -20,4 +20,16 @@ def LowerToP4CoreLib : Pass<"lower-to-p4corelib", "mlir::ModuleOp"> {
   ];
 }
 
+def LowerP4HIRToMLIRCore : Pass<"lower-p4hir-to-mlir-core", "mlir::ModuleOp"> {
+  let summary = "Convert the P4HIR ops to a collection of core MLIR dialects";
+  let constructor = "::P4::P4MLIR::createLowerP4HIRToMLIRCorePass()";
+  let dependentDialects = ["func::FuncDialect", "arith::ArithDialect", "memref::MemRefDialect", "scf::SCFDialect"];
+}
+
+def LowerP4HIRToLLVM : Pass<"lower-p4hir-to-llvm", "mlir::ModuleOp"> {
+  let summary = "Convert the P4HIR ops to P4HIR ops with LLVM dialect";
+  let constructor = "::P4::P4MLIR::createLowerP4HIRToLLVMPass()";
+  let dependentDialects = ["LLVM::LLVMDialect", "cf::ControlFlowDialect"];
+}
+
 #endif // P4MLIR_CONVERSION_PASSES_TD

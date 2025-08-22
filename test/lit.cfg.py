@@ -54,6 +54,7 @@ llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 tool_dirs = [config.p4mlir_tools_dir, config.llvm_tools_dir]
 tools = [
     "mlir-opt",
+    "p4mlir-ebpf",
     "p4mlir-opt",
     "p4mlir-translate"
 ]
