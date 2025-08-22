@@ -30,83 +30,86 @@ struct AnyCallOpInterfaceConversionPattern : public OpInterfaceConversionPattern
 
 P4HIRTypeConverter::P4HIRTypeConverter() {
     addConversion([&](mlir::Type t) { return t; });
-
     addTypeAttributeConversion([](mlir::Type, Attribute attr) { return attr; });
 
-    addTypeAttributeConversion([&](mlir::Type type, P4HIR::AggAttr attr) {
-        if (isLegal(type)) return attr;
+    configureP4HIRTypeConverter(*this);
+}
+
+void P4::P4MLIR::configureP4HIRTypeConverter(mlir::TypeConverter &converter) {
+    converter.addTypeAttributeConversion([&](mlir::Type type, P4HIR::AggAttr attr) {
+        if (converter.isLegal(type)) return attr;
 
         SmallVector<Attribute> newAttrs;
         llvm::transform(
             attr.getFields().getAsRange<mlir::TypedAttr>(), std::back_inserter(newAttrs),
             [&](auto fieldAttr) {
-                return convertTypeAttribute(fieldAttr.getType(), fieldAttr).value_or(nullptr);
+                return converter.convertTypeAttribute(fieldAttr.getType(), fieldAttr).value_or(nullptr);
             });
 
-        return P4HIR::AggAttr::get(convertType(type), ArrayAttr::get(attr.getContext(), newAttrs));
+        return P4HIR::AggAttr::get(converter.convertType(type), ArrayAttr::get(attr.getContext(), newAttrs));
     });
 
-    addConversion([&](P4HIR::CtorType ctorType) {
+    converter.addConversion([&](P4HIR::CtorType ctorType) {
         // Expect empty ctor args
         return P4HIR::CtorType::get(ctorType.getContext(), ctorType.getInputs(),
-                                    convertType(ctorType.getReturnType()));
+                                    converter.convertType(ctorType.getReturnType()));
     });
 
-    addConversion([&](P4HIR::ExternType externType) -> mlir::Type {
+    converter.addConversion([&](P4HIR::ExternType externType) -> mlir::Type {
         SmallVector<mlir::Type> newTypeArgs;
-        if (failed(convertTypes(externType.getTypeArguments(), newTypeArgs))) return nullptr;
+        if (failed(converter.convertTypes(externType.getTypeArguments(), newTypeArgs))) return nullptr;
         return P4HIR::ExternType::get(externType.getContext(), externType.getName(), newTypeArgs,
                                       externType.getAnnotations());
     });
 
-    addConversion([&](P4HIR::ControlType controlType) -> mlir::Type {
+    converter.addConversion([&](P4HIR::ControlType controlType) -> mlir::Type {
         SmallVector<mlir::Type> newInputs, newTypeArgs;
-        if (failed(convertTypes(controlType.getInputs(), newInputs))) return nullptr;
-        if (failed(convertTypes(controlType.getTypeArguments(), newTypeArgs))) return nullptr;
+        if (failed(converter.convertTypes(controlType.getInputs(), newInputs))) return nullptr;
+        if (failed(converter.convertTypes(controlType.getTypeArguments(), newTypeArgs))) return nullptr;
 
         return P4HIR::ControlType::get(controlType.getContext(), controlType.getName(), newInputs,
                                        newTypeArgs, controlType.getAnnotations());
     });
 
-    addConversion([&](P4HIR::ParserType parserType) -> mlir::Type {
+    converter.addConversion([&](P4HIR::ParserType parserType) -> mlir::Type {
         SmallVector<mlir::Type> newInputs, newTypeArgs;
-        if (failed(convertTypes(parserType.getInputs(), newInputs))) return nullptr;
-        if (failed(convertTypes(parserType.getTypeArguments(), newTypeArgs))) return nullptr;
+        if (failed(converter.convertTypes(parserType.getInputs(), newInputs))) return nullptr;
+        if (failed(converter.convertTypes(parserType.getTypeArguments(), newTypeArgs))) return nullptr;
 
         return P4HIR::ParserType::get(parserType.getContext(), parserType.getName(), newInputs,
                                       newTypeArgs, parserType.getAnnotations());
     });
 
-    addConversion([&](P4HIR::SetType setType) {
-        return P4HIR::SetType::get(convertType(setType.getElementType()));
+    converter.addConversion([&](P4HIR::SetType setType) {
+        return P4HIR::SetType::get(converter.convertType(setType.getElementType()));
     });
 
-    addConversion([&](P4HIR::ArrayType arrayType) {
-        return P4HIR::ArrayType::get(arrayType.getSize(), convertType(arrayType.getElementType()));
+    converter.addConversion([&](P4HIR::ArrayType arrayType) {
+        return P4HIR::ArrayType::get(arrayType.getSize(), converter.convertType(arrayType.getElementType()));
     });
 
-    addConversion([&](P4HIR::HeaderStackType hsType) {
+    converter.addConversion([&](P4HIR::HeaderStackType hsType) {
         return P4HIR::HeaderStackType::get(
             hsType.getContext(), hsType.getArraySize(),
-            cast<P4HIR::StructLikeTypeInterface>(convertType(hsType.getArrayElementType())));
+            cast<P4HIR::StructLikeTypeInterface>(converter.convertType(hsType.getArrayElementType())));
     });
 
-    addConversion([&](P4HIR::HeaderUnionType headerunionType) {
+    converter.addConversion([&](P4HIR::HeaderUnionType headerunionType) {
         SmallVector<P4HIR::FieldInfo> newFields;
         llvm::transform(headerunionType.getFields(), std::back_inserter(newFields),
                         [&](auto field) -> P4HIR::FieldInfo {
-                            return {field.name, convertType(field.type), field.annotations};
+                            return {field.name, converter.convertType(field.type), field.annotations};
                         });
 
         return P4HIR::HeaderUnionType::get(headerunionType.getContext(), headerunionType.getName(),
                                            newFields, headerunionType.getAnnotations());
     });
 
-    addConversion([&](P4HIR::HeaderType headerType) {
+    converter.addConversion([&](P4HIR::HeaderType headerType) {
         SmallVector<P4HIR::FieldInfo> newFields;
         llvm::transform(headerType.getFields(), std::back_inserter(newFields),
                         [&](auto field) -> P4HIR::FieldInfo {
-                            return {field.name, convertType(field.type), field.annotations};
+                            return {field.name, converter.convertType(field.type), field.annotations};
                         });
         // Remove validity bit field, it is added automatically
         newFields.pop_back();
@@ -115,36 +118,36 @@ P4HIRTypeConverter::P4HIRTypeConverter() {
                                       headerType.getAnnotations());
     });
 
-    addConversion([&](P4HIR::StructType structType) {
+    converter.addConversion([&](P4HIR::StructType structType) {
         SmallVector<P4HIR::FieldInfo> newFields;
         llvm::transform(structType.getFields(), std::back_inserter(newFields),
                         [&](auto field) -> P4HIR::FieldInfo {
-                            return {field.name, convertType(field.type), field.annotations};
+                            return {field.name, converter.convertType(field.type), field.annotations};
                         });
 
         return P4HIR::StructType::get(structType.getContext(), structType.getName(), newFields,
                                       structType.getAnnotations());
     });
 
-    addConversion([&](P4HIR::FuncType fnType) -> mlir::Type {
+    converter.addConversion([&](P4HIR::FuncType fnType) -> mlir::Type {
         // Convert the original function types.
         llvm::SmallVector<Type> newResults, newArguments, newTypeArgs;
-        if (failed(convertTypes(fnType.getReturnTypes(), newResults))) return nullptr;
-        if (failed(convertTypes(fnType.getInputs(), newArguments))) return nullptr;
-        if (failed(convertTypes(fnType.getTypeArguments(), newTypeArgs))) return nullptr;
+        if (failed(converter.convertTypes(fnType.getReturnTypes(), newResults))) return nullptr;
+        if (failed(converter.convertTypes(fnType.getInputs(), newArguments))) return nullptr;
+        if (failed(converter.convertTypes(fnType.getTypeArguments(), newTypeArgs))) return nullptr;
 
         return P4HIR::FuncType::get(fnType.getContext(), newArguments,
                                     newResults.empty() ? mlir::Type() : newResults.front(),
                                     newTypeArgs);
     });
 
-    addConversion([&](P4HIR::AliasType aliasType) {
-        return P4HIR::AliasType::get(aliasType.getName(), convertType(aliasType.getAliasedType()),
+    converter.addConversion([&](P4HIR::AliasType aliasType) {
+        return P4HIR::AliasType::get(aliasType.getName(), converter.convertType(aliasType.getAliasedType()),
                                      aliasType.getAnnotations());
     });
 
-    addConversion([&](P4HIR::ReferenceType refType) {
-        return P4HIR::ReferenceType::get(convertType(refType.getObjectType()));
+    converter.addConversion([&](P4HIR::ReferenceType refType) {
+        return P4HIR::ReferenceType::get(converter.convertType(refType.getObjectType()));
     });
 }
 

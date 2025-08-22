@@ -1122,10 +1122,20 @@ def StructExtractRefOp : P4HIR_Op<"struct_extract_ref",
   ];
 
   let extraClassDeclaration = [{
+    /// Return the P4HIR::FieldInfo for the accessed field.
+    auto getFieldInfo() {
+      auto type = mlir::cast<StructLikeTypeInterface>(mlir::cast<ReferenceType>(getInput().getType()).getObjectType());
+      return type.getFields()[getFieldIndex()];
+    }
+
+    /// Return the type of the accessed field.
+    mlir::Type getFieldType() {
+      return getFieldInfo().type;
+    }
+
     /// Return the name attribute of the accessed field.
     mlir::StringAttr getFieldNameAttr() {
-      auto type = mlir::cast<StructLikeTypeInterface>(mlir::cast<ReferenceType>(getInput().getType()).getObjectType());
-      return type.getFields()[getFieldIndex()].name;
+      return getFieldInfo().name;
     }
 
     /// Return the name of the accessed field.

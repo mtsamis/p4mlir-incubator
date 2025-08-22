@@ -7,6 +7,8 @@
 
 namespace P4::P4MLIR {
 
+void configureP4HIRTypeConverter(mlir::TypeConverter &converter);
+
 /// A helper type converter class that automatically populates the relevant
 ///  type conversions for compound P4HIR types
 class P4HIRTypeConverter : public mlir::TypeConverter {

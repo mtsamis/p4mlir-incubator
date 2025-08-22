@@ -7,6 +7,7 @@ configure_lit_site_cfg(
 
 set(P4MLIR_TEST_DEPENDS
   FileCheck count not
+  p4mlir-ebpf
   p4mlir-opt
   p4mlir-translate
 )
