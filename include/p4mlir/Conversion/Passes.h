@@ -31,6 +31,7 @@ namespace P4::P4MLIR {
 #define GEN_PASS_DECL_LOWERP4HIRTOLLVM
 #include "p4mlir/Conversion/Passes.h.inc"
 
+std::unique_ptr<mlir::Pass> createLowerToP4CoreLibPass();
 std::unique_ptr<mlir::Pass> createLowerP4HIRToLLVMPass();
 
 // TODO move these elsewhere.

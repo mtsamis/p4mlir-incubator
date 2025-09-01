@@ -68,10 +68,12 @@ int processMLIR(mlir::OwningOpRef<mlir::ModuleOp> &module) {
     if (mlir::failed(mlir::applyPassManagerCLOptions(pm))) return -1;
 
     pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(createLowerToP4CoreLibPass());
     pm.addPass(createSerEnumEliminationPass());
     pm.addPass(createFlattenCFGPass());
     pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(createLowerP4HIRToLLVMPass());
+    pm.addPass(mlir::createCanonicalizerPass());
 
     if (mlir::failed(pm.run(*module))) return -1;
 

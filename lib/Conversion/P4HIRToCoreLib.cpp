@@ -213,3 +213,7 @@ void LowerToP4CoreLib::runOnOperation() {
 
     if (failed(applyPartialConversion(module, target, std::move(patterns)))) signalPassFailure();
 }
+
+std::unique_ptr<Pass> P4::P4MLIR::createLowerToP4CoreLibPass() {
+    return std::make_unique<LowerToP4CoreLib>();
+}
