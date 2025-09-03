@@ -67,6 +67,13 @@ struct IfOpFlattening : public OpRewritePattern<P4HIR::IfOp> {
         }
 
         rewriter.replaceOp(ifOp, afterBlock->getArguments());
+
+        // Super-duper temporary workaround for missing terminators in apply blocks.
+        if (afterBlock->empty()) {
+            rewriter.setInsertionPointToStart(afterBlock);
+            rewriter.create<P4HIR::ReturnOp>(loc);
+        }
+
         return mlir::success();
     }
 };
