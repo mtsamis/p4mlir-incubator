@@ -11,6 +11,10 @@ def StructLikeTypeInterface : TypeInterface<"StructLikeTypeInterface"> {
 
   let methods = [
     InterfaceMethod<[{
+      Get the name of this struct.
+    }],
+     "mlir::StringRef", "getName">,
+    InterfaceMethod<[{
       Get the type of the field at a given index
     }],
       "mlir::Type", "getFieldType", (ins "mlir::StringRef":$fieldName)>,
