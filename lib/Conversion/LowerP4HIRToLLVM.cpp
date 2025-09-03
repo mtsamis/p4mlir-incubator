@@ -47,6 +47,48 @@ struct LowerP4HIRToLLVMPass : public P4::P4MLIR::impl::LowerP4HIRToLLVMBase<Lowe
     void runOnOperation() override;
 };
 
+// These static helpers provide basic "name mangling" for functions, types and members names during
+// conversion.
+// TODO Move these somewhere else since we'll probably need them to complete other lowering parts
+// (e.g. core lib).
+
+static std::string nameFor(mlir::Operation *op) {
+    if (auto parserOp = mlir::dyn_cast<P4HIR::ParserOp>(op)) {
+        return (llvm::Twine("_p_") + parserOp.getSymName()).str();
+    } else if (auto controlOp = mlir::dyn_cast<P4HIR::ControlOp>(op)) {
+        return (llvm::Twine("_c_") + controlOp.getSymName()).str();
+    } else if (auto externOp = mlir::dyn_cast<P4HIR::ExternOp>(op)) {
+        return (llvm::Twine("_e_") + externOp.getSymName()).str();
+    } else {
+        llvm_unreachable("Invalid op");
+        return {};
+    }
+}
+
+static std::string stateTypeNameFor(mlir::Operation *op) { return nameFor(op) + "__state"; }
+
+static std::string memberFn(llvm::StringRef parent, llvm::StringRef child) {
+    return (parent + "_m_" + child).str();
+}
+
+static std::string memberFn(llvm::StringRef parent, P4HIR::ParserStateOp stateOp) {
+    return memberFn(parent, stateOp.getSymName());
+}
+
+static std::string memberFn(llvm::StringRef parent, P4HIR::FuncOp funcOp) {
+    return memberFn(parent, funcOp.getSymName());
+}
+
+static std::string specialInitFn(llvm::StringRef parent) { return memberFn(parent, "_init"); }
+
+static std::string specialInitFn(mlir::Operation *parent) { return specialInitFn(nameFor(parent)); }
+
+static std::string specialApplyFn(llvm::StringRef parent) { return memberFn(parent, "_apply"); }
+
+static std::string specialApplyFn(mlir::Operation *parent) {
+    return specialApplyFn(nameFor(parent));
+}
+
 template <typename OpTy>
 struct FuncLikeOpConversion : public ConvertOpToLLVMPattern<OpTy> {
     using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
@@ -55,6 +97,13 @@ struct FuncLikeOpConversion : public ConvertOpToLLVMPattern<OpTy> {
     mlir::LogicalResult matchAndRewrite(OpTy op, OpAdaptor adaptor,
                                         mlir::ConversionPatternRewriter &rewriter) const override {
         auto funcType = op.getFunctionType();
+        if (!funcType.getTypeArguments().empty()) {
+            // TODO temporary.
+            rewriter.eraseOp(op);
+            return mlir::success();
+            // return rewriter.notifyMatchFailure(op, "Cannot handle type arguments");
+        }
+
         auto retType = funcType.getOptionalReturnType();
         auto mlirFuncType =
             mlir::FunctionType::get(rewriter.getContext(), funcType.getInputs(),
@@ -64,7 +113,7 @@ struct FuncLikeOpConversion : public ConvertOpToLLVMPattern<OpTy> {
         auto llvmFuncType =
             this->getTypeConverter()->convertFunctionSignature(mlirFuncType, false, false, result);
 
-        if (!llvmFuncType) return rewriter.notifyMatchFailure(op, "signature conversion failed");
+        if (!llvmFuncType) return rewriter.notifyMatchFailure(op, "Signature conversion failed");
 
         // TODO see what attributes we want to handle.
         auto newFuncOp = rewriter.create<LLVM::LLVMFuncOp>(op.getLoc(), op.getName(), llvmFuncType);
@@ -83,16 +132,6 @@ struct FuncLikeOpConversion : public ConvertOpToLLVMPattern<OpTy> {
     }
 };
 
-struct ExternOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::ExternOp> {
-    using ConvertOpToLLVMPattern<P4HIR::ExternOp>::ConvertOpToLLVMPattern;
-
-    mlir::LogicalResult matchAndRewrite(P4HIR::ExternOp op, OpAdaptor adaptor,
-                                        mlir::ConversionPatternRewriter &rewriter) const override {
-        rewriter.eraseOp(op);
-        return mlir::success();
-    }
-};
-
 template <typename OpTy>
 struct CallLikeOpConversion : public ConvertOpToLLVMPattern<OpTy> {
     using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
@@ -101,10 +140,192 @@ struct CallLikeOpConversion : public ConvertOpToLLVMPattern<OpTy> {
     mlir::LogicalResult matchAndRewrite(OpTy op, OpAdaptor adaptor,
                                         mlir::ConversionPatternRewriter &rewriter) const override {
         auto converter = this->getTypeConverter();
-        auto res = converter->convertType(op.getResult().getType());
-        rewriter.replaceOpWithNewOp<LLVM::CallOp>(
-            op, res ? mlir::TypeRange(res) : mlir::TypeRange(),
-            adaptor.getCallee().getLeafReference(), adaptor.getArgOperands());
+        auto mod = op->template getParentOfType<mlir::ModuleOp>();
+
+        auto callee = adaptor.getCallee();
+        auto rootOp = mod.lookupSymbol(callee.getRootReference());
+        auto newOperands = llvm::to_vector(adaptor.getArgOperands());
+        mlir::StringAttr newCallee;
+
+        if (mlir::isa<P4HIR::ControlOp>(rootOp)) {
+            // Adjust calls within controls to the corresponding control member function.
+            // This should probably be moved to Control Conversion.
+            auto parent = op->template getParentOfType<LLVM::LLVMFuncOp>();
+            if (!parent) return mlir::failure();
+
+            auto name = memberFn(nameFor(rootOp), callee.getLeafReference());
+            newCallee = rewriter.getStringAttr(name);
+            newOperands.insert(newOperands.begin(), parent.getArguments().begin(),
+                               parent.getArguments().end());
+        } else {
+            newCallee = callee.getLeafReference();
+        }
+
+        if (op.getResult()) {
+            auto resType = converter->convertType(op.getResult().getType());
+            rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, resType, newCallee, newOperands);
+        } else {
+            rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, mlir::TypeRange(), newCallee,
+                                                      newOperands);
+        }
+
+        return mlir::success();
+    }
+};
+
+// TODO
+struct CallMethodOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::CallMethodOp> {
+    using ConvertOpToLLVMPattern<P4HIR::CallMethodOp>::ConvertOpToLLVMPattern;
+
+    mlir::LogicalResult matchAndRewrite(P4HIR::CallMethodOp op, OpAdaptor adaptor,
+                                        mlir::ConversionPatternRewriter &rewriter) const override {
+        rewriter.eraseOp(op);
+        return mlir::success();
+    }
+};
+
+struct ExternOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::ExternOp> {
+    using ConvertOpToLLVMPattern<P4HIR::ExternOp>::ConvertOpToLLVMPattern;
+
+    mlir::LogicalResult matchAndRewrite(P4HIR::ExternOp op, OpAdaptor adaptor,
+                                        mlir::ConversionPatternRewriter &rewriter) const override {
+        auto parentName = nameFor(op);
+        rewriter.startOpModification(op);
+        op.walk([&](P4HIR::FuncOp fn) { fn.setSymName(memberFn(parentName, fn.getSymName())); });
+        rewriter.finalizeOpModification(op);
+
+        rewriter.inlineBlockBefore(&op.getBody().front(), op);
+        rewriter.eraseOp(op);
+        return mlir::success();
+    }
+};
+
+struct OverloadSetOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::OverloadSetOp> {
+    using ConvertOpToLLVMPattern<P4HIR::OverloadSetOp>::ConvertOpToLLVMPattern;
+
+    mlir::LogicalResult matchAndRewrite(P4HIR::OverloadSetOp op, OpAdaptor adaptor,
+                                        mlir::ConversionPatternRewriter &rewriter) const override {
+        rewriter.inlineBlockBefore(&op.getBody().front(), op);
+        rewriter.eraseOp(op);
+        return mlir::success();
+    }
+};
+
+// Handled through InstantiateOpConversion.
+struct ConstructOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::ConstructOp> {
+    using ConvertOpToLLVMPattern<P4HIR::ConstructOp>::ConvertOpToLLVMPattern;
+
+    mlir::LogicalResult matchAndRewrite(P4HIR::ConstructOp op, OpAdaptor adaptor,
+                                        mlir::ConversionPatternRewriter &rewriter) const override {
+        rewriter.eraseOp(op);
+        return mlir::success();
+    }
+};
+
+// Handled through InstantiateOpConversion.
+struct PackageOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::PackageOp> {
+    using ConvertOpToLLVMPattern<P4HIR::PackageOp>::ConvertOpToLLVMPattern;
+
+    mlir::LogicalResult matchAndRewrite(P4HIR::PackageOp op, OpAdaptor adaptor,
+                                        mlir::ConversionPatternRewriter &rewriter) const override {
+        rewriter.eraseOp(op);
+        return mlir::success();
+    }
+};
+
+struct InstantiateOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::InstantiateOp> {
+    using ConvertOpToLLVMPattern<P4HIR::InstantiateOp>::ConvertOpToLLVMPattern;
+
+    llvm::SmallVector<mlir::Value, 4> instantiate(mlir::ConversionPatternRewriter &rewriter,
+                                                  mlir::ModuleOp mod, mlir::Location loc,
+                                                  mlir::Operation *op,
+                                                  mlir::ValueRange arguments) const {
+        if (mlir::isa<P4HIR::ParserOp, P4HIR::ControlOp>(op)) {
+            auto stateType =
+                LLVM::LLVMStructType::getIdentified(mod.getContext(), stateTypeNameFor(op));
+            auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+            auto one = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getIntegerType(64),
+                                                         rewriter.getI64IntegerAttr(1));
+
+            llvm::SmallVector<mlir::Value, 4> args;
+            auto alloca = rewriter.create<LLVM::AllocaOp>(loc, ptrType, stateType, one);
+            args.push_back(alloca.getRes());
+
+            // Initial implementation for argument allocation.
+            // These need to be moved in some proper helper and/or merged with the "local variables
+            // logic".
+            auto funcType = mlir::cast<P4HIR::FuncType>(
+                mlir::cast<mlir::FunctionOpInterface>(op).getFunctionType());
+            for (mlir::Type argType : funcType.getInputs()) {
+                mlir::Type allocaType = argType;
+
+                if (auto refType = mlir::dyn_cast<P4HIR::ReferenceType>(argType)) {
+                    allocaType = refType.getObjectType();
+                }
+
+                auto allocaTypeLLVM = getTypeConverter()->convertType(allocaType);
+                auto alloca = rewriter.create<LLVM::AllocaOp>(loc, ptrType, allocaTypeLLVM, one);
+
+                if (mlir::isa<P4HIR::ReferenceType>(argType)) {
+                    args.push_back(alloca.getRes());
+                } else {
+                    auto load = rewriter.create<LLVM::LoadOp>(loc, allocaTypeLLVM, alloca.getRes());
+                    args.push_back(load.getRes());
+                }
+            }
+
+            // Call initializer.
+            auto voidType = LLVM::LLVMVoidType::get(rewriter.getContext());
+            rewriter.create<LLVM::CallOp>(loc, voidType, specialInitFn(op), args);
+
+            return args;
+        } else if (auto externOp = mlir::dyn_cast<P4HIR::ExternOp>(op)) {
+            // TODO Call constructor if present.
+            return {};
+        } else if (auto constructOp = mlir::dyn_cast<P4HIR::ConstructOp>(op)) {
+            auto target = mod.lookupSymbol(constructOp.getCallee());
+            if (!target) return {};
+            return instantiate(rewriter, mod, target->getLoc(), target,
+                               constructOp.getArgOperands());
+        } else if (auto packageOp = mlir::dyn_cast<P4HIR::PackageOp>(op)) {
+            // llvm::SmallVector<mlir::Value, 4> stateInsts;
+
+            for (mlir::Value arg : arguments) {
+                auto target = arg.getDefiningOp();
+                auto stateInst = instantiate(rewriter, mod, loc, target, {});
+                // stateInsts.push_back(stateInst);
+            }
+
+            // We need to place the arguments forwarding logic etc here.
+            // Call apply...
+
+            return {};
+        } else {
+            llvm_unreachable("Impossible instantiation target");
+            return {};
+        }
+    }
+
+    mlir::LogicalResult matchAndRewrite(P4HIR::InstantiateOp op, OpAdaptor adaptor,
+                                        mlir::ConversionPatternRewriter &rewriter) const override {
+        auto mod = op->getParentOfType<mlir::ModuleOp>();
+        auto instTarget = mod.lookupSymbol(op.getCallee());
+        if (!instTarget) return mlir::failure();
+
+        if (op.getSymName() == "main") {
+            // Create a main function for the main package.
+            auto voidType = LLVM::LLVMVoidType::get(rewriter.getContext());
+            auto funcType = LLVM::LLVMFunctionType::get(voidType, {});
+            auto func = rewriter.create<LLVM::LLVMFuncOp>(op.getLoc(), "main", funcType);
+            Block *entryBlock = func.addEntryBlock(rewriter);
+            rewriter.setInsertionPointToStart(entryBlock);
+
+            instantiate(rewriter, mod, op.getLoc(), instTarget, op.getArgOperands());
+
+            rewriter.create<LLVM::ReturnOp>(op.getLoc(), mlir::ValueRange());
+        }
+
+        rewriter.eraseOp(op);
         return mlir::success();
     }
 };
@@ -128,6 +349,8 @@ struct ConstOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::ConstOp> {
 
     mlir::LogicalResult matchAndRewrite(P4HIR::ConstOp op, OpAdaptor adaptor,
                                         mlir::ConversionPatternRewriter &rewriter) const override {
+        // Constants that cannot be materialzed (e.g. set types) are expected to be eliminated from
+        // other conversions.
         if (isMaterializableConstant(op)) {
             auto newAttr = getTypeConverter()->convertTypeAttribute(op.getType(), op.getValue());
             rewriter.replaceOpWithNewOp<LLVM::ConstantOp>(op,
@@ -387,6 +610,7 @@ FailureOr<Block *> getConvertedBlock(ConversionPatternRewriter &rewriter,
     return rewriter.applySignatureConversion(block, *conversion, converter);
 }
 
+// Similar to ControlFlow.BranchOp
 struct BrOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::BrOp> {
     using ConvertOpToLLVMPattern<P4HIR::BrOp>::ConvertOpToLLVMPattern;
 
@@ -400,6 +624,7 @@ struct BrOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::BrOp> {
     }
 };
 
+// Similar to ControlFlow.CondBranchOp
 struct CondBrOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::CondBrOp> {
     using ConvertOpToLLVMPattern<P4HIR::CondBrOp>::ConvertOpToLLVMPattern;
 
@@ -450,6 +675,7 @@ struct StructLikeOpConversion : public ConvertOpToLLVMPattern<OpTy> {
 
     mlir::LogicalResult matchAndRewrite(OpTy op, OpAdaptor adaptor,
                                         mlir::ConversionPatternRewriter &rewriter) const override {
+        // Convert struct/tuple like initializer.
         auto type = this->getTypeConverter()->convertType(op.getType());
         mlir::Value result = rewriter.create<LLVM::UndefOp>(op.getLoc(), type);
         unsigned structPos = 0;
@@ -466,6 +692,8 @@ struct ArrayGetOpConversion : public ConvertOpToLLVMPattern<P4HIR::ArrayGetOp> {
     mlir::LogicalResult matchAndRewrite(P4HIR::ArrayGetOp op, OpAdaptor adaptor,
                                         mlir::ConversionPatternRewriter &rewriter) const override {
         // TODO we have an issue with value arrays here.
+        // Currently an RHS expression like a[idx].b emits a a[idx] as a value rather than a ref.
+        // We need to fix this in the translator or emit bad code and hope LLVM optimizes it.
         auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
         auto elmType = getTypeConverter()->convertType(op.getResult().getType());
         auto elmPtr =
@@ -515,60 +743,21 @@ struct StructExtractRefOpConversion : public ConvertOpToLLVMPattern<P4HIR::Struc
     }
 };
 
-static std::string nameFor(mlir::Operation *op) {
-    if (auto parserOp = mlir::dyn_cast<P4HIR::ParserOp>(op)) {
-        return (llvm::Twine("_p_") + parserOp.getSymName()).str();
-    } else if (auto controlOp = mlir::dyn_cast<P4HIR::ControlOp>(op)) {
-        return (llvm::Twine("_c_") + controlOp.getSymName()).str();
-    } else {
-        llvm_unreachable("Invalid op");
-        return {};
-    }
-}
-
-static std::string memberFn(llvm::StringRef parent, llvm::StringRef child) {
-    return (parent + "_m_" + child).str();
-}
-
-static std::string memberFn(llvm::StringRef parent, P4HIR::ParserStateOp stateOp) {
-    return memberFn(parent, stateOp.getSymName());
-}
-
-static std::string memberFn(llvm::StringRef parent, P4HIR::FuncOp funcOp) {
-    return memberFn(parent, funcOp.getSymName());
-}
-
-static std::string specialInitFn(llvm::StringRef parent) { return memberFn(parent, "_init"); }
-
-static std::string specialInitFn(mlir::Operation *parent) { return specialInitFn(nameFor(parent)); }
-
-static std::string specialApplyFn(llvm::StringRef parent) { return memberFn(parent, "_apply"); }
-
-static std::string specialApplyFn(mlir::Operation *parent) {
-    return specialApplyFn(nameFor(parent));
-}
-
 // Helper to transform parsers and controls.
-// TODO find appropriate name and generalize further.
-struct PCHelper {
-    PCHelper(const TypeConverter *converter, mlir::ConversionPatternRewriter &rewriter,
-               mlir::Operation *op)
-        : converter(converter), rewriter(rewriter), op(op), loc(op->getLoc()) {
+struct ParserOrControlConversionHelper {
+    ParserOrControlConversionHelper(const TypeConverter *converter,
+                                    mlir::ConversionPatternRewriter &rewriter, mlir::Operation *op,
+                                    mlir::ValueRange arguments)
+        : converter(converter),
+          rewriter(rewriter),
+          op(op),
+          arguments(arguments),
+          loc(op->getLoc()) {
         ctx = rewriter.getContext();
         mod = op->getParentOfType<mlir::ModuleOp>();
     }
 
-    void addLocal(mlir::Operation *op) {
-        if (auto variableOp = mlir::dyn_cast<P4HIR::VariableOp>(op)) {
-            localVars.push_back(variableOp);
-            auto objType =
-                mlir::cast<P4HIR::ReferenceType>(variableOp.getRef().getType()).getObjectType();
-            localTypes.push_back(objType);
-        } else {
-            // ControlLocalOp
-        }
-    }
-
+    // Categorize operations within a parser/control.
     void add(mlir::Operation *op) {
         if (mlir::isa<P4HIR::VariableOp, P4HIR::ControlLocalOp>(op)) {
             addLocal(op);
@@ -583,6 +772,25 @@ struct PCHelper {
         }
     }
 
+    void addLocal(mlir::Operation *op) {
+        // TODO Create a helper for all the "local variables logic".
+        if (auto variableOp = mlir::dyn_cast<P4HIR::VariableOp>(op)) {
+            localVars.push_back(variableOp);
+            auto objType = variableOp.getRef().getType();
+            localTypes.push_back(objType);
+        } else if (auto controlLocalOp = mlir::dyn_cast<P4HIR::ControlLocalOp>(op)) {
+            auto val = controlLocalOp.getVal();
+
+            if (mlir::isa<mlir::BlockArgument>(val)) {
+                symMap.insert({controlLocalOp.getSymName(), val});
+            } else {
+                localVars.push_back(controlLocalOp);
+                auto objType = controlLocalOp.getVal().getType();
+                localTypes.push_back(objType);
+            }
+        }
+    }
+
     void init() {
         ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
 
@@ -592,91 +800,138 @@ struct PCHelper {
             retTy = LLVM::LLVMVoidType::get(ctx);
         }
 
-        // stateTy = LLVM::LLVMStructType::getNewIdentified(ctx, "parser_state", localTypes, true);
+        LLVM::LLVMStructType::getNewIdentified(ctx, stateTypeNameFor(op), localTypes, true);
     }
 
-    std::pair<LLVM::LLVMFuncOp, mlir::IRMapping> createFn(mlir::Type returnType,
-                                                          llvm::StringRef name, bool addArguments) {
+    // Create a new member function for this parser/control.
+    // For parsers this corresponds to state functions.
+    // For controls this corresponds to actions.
+    LLVM::LLVMFuncOp createMemberFunction(
+        mlir::Type returnType, llvm::StringRef name, bool addArguments,
+        llvm::function_ref<void(LLVM::LLVMFuncOp, mlir::IRMapping &)> createFunctionBody) {
         llvm::SmallVector<mlir::Type, 8> signature;
 
-        // `this` state pointer.
+        // First argument is a `this` state pointer.
         signature.push_back(ptrTy);
 
-        if (addArguments) {
-            for (auto arg : arguments) {
-                signature.push_back(converter->convertType(arg.getType()));
-            }
-        }
+        if (addArguments)
+            for (auto arg : arguments) signature.push_back(converter->convertType(arg.getType()));
 
         auto funcType = LLVM::LLVMFunctionType::get(returnType, signature);
-
         auto func = rewriter.create<LLVM::LLVMFuncOp>(loc, name, funcType);
         func.setPrivate();
-
+        // Use a 'member_of' attribute to keep track that this is a member function of a particular
+        // parser/control.
         func->setAttr("member_of", mlir::StringAttr::get(ctx, nameFor(op)));
+
+        // We need to map:
+        //   1) Original values to the arguments in the newly created function.
+        //   2) Original local variables to members in the `this` state object.
+        //   3) Original constants to newly cloned constants within the function.
+        //   4) p4hir.symbol_ref operations in control actions to members in the `this` state
+        //   object.
+        // 1, 2 and 3 are done with `irMapping` while 4 is done with `symMapping`.
+        mlir::IRMapping irMapping;
+        llvm::DenseMap<mlir::StringRef, mlir::Value> symMapping = symMap;
 
         Block *entryBlock = func.addEntryBlock(rewriter);
         rewriter.setInsertionPointToStart(entryBlock);
-
-        mlir::IRMapping mapping;
-
         auto thisPtr = func.getArgument(0);
-        for (size_t i = 0; i < localVars.size(); i++) {
+
+        for (size_t i = 0; i < localTypes.size(); i++) {
             auto localVar = localVars[i];
             auto type = localTypes[i];
-            auto fieldType = converter->convertType(type);
-            auto gepOp = rewriter.create<LLVM::GEPOp>(localVar->getLoc(), ptrTy, fieldType, thisPtr,
-                                                      ArrayRef<LLVM::GEPArg>{i});
-            auto refType = P4HIR::ReferenceType::get(type);
-            auto ucOp = rewriter.create<mlir::UnrealizedConversionCastOp>(
-                localVar->getLoc(), refType, gepOp->getResults());
-            mapping.map(localVar->getResults(), ucOp->getResults());
+            mlir::Operation *replacement;
+
+            // TODO Create a helper for all the "local variables logic".
+            if (auto refType = mlir::dyn_cast<P4HIR::ReferenceType>(type)) {
+                auto fieldType = converter->convertType(refType.getObjectType());
+                auto gepOp = rewriter.create<LLVM::GEPOp>(localVar->getLoc(), ptrTy, fieldType,
+                                                          thisPtr, ArrayRef<LLVM::GEPArg>{i});
+                replacement = rewriter.create<mlir::UnrealizedConversionCastOp>(
+                    localVar->getLoc(), type, gepOp->getResults());
+            } else {
+                auto fieldType = converter->convertType(type);
+                auto gepOp = rewriter.create<LLVM::GEPOp>(localVar->getLoc(), ptrTy, fieldType,
+                                                          thisPtr, ArrayRef<LLVM::GEPArg>{i});
+                auto val = rewriter.create<LLVM::LoadOp>(localVar->getLoc(), fieldType, gepOp);
+                replacement = rewriter.create<mlir::UnrealizedConversionCastOp>(
+                    localVar->getLoc(), type, val->getResults());
+            }
+
+            assert(replacement->getNumResults() == 1);
+
+            if (auto controlLocalOp = mlir::dyn_cast<P4HIR::ControlLocalOp>(localVar)) {
+                symMapping.insert({controlLocalOp.getSymName(), replacement->getResult(0)});
+            } else {
+                irMapping.map(localVar->getResult(0), replacement->getResult(0));
+            }
         }
 
         if (addArguments) {
+            // Use unrealized casts to convert arguments to their original types, since we haven't
+            // converted the body yet.
             for (size_t i = 0; i < arguments.size(); i++) {
                 auto arg = arguments[i];
                 auto ucOp = rewriter.create<mlir::UnrealizedConversionCastOp>(
                     arg.getLoc(), arg.getType(), func.getArgument(i + 1));
                 assert(ucOp->getNumResults() == 1);
-                mapping.map(arg, ucOp->getResult(0));
+                irMapping.map(arg, ucOp->getResult(0));
             }
         }
 
         // Clone all constants and let the canonicalizer clean up.
         for (auto constOp : constantOps) {
             auto newConstOp = rewriter.clone(*constOp);
-            mapping.map(constOp->getResults(), newConstOp->getResults());
+            irMapping.map(constOp->getResults(), newConstOp->getResults());
         }
 
-        return {func, std::move(mapping)};
+        createFunctionBody(func, irMapping);
+
+        // Replace p4hir.symbol_ref in the function body.
+        func->walk([&](mlir::Operation *op) {
+            if (auto symOp = mlir::dyn_cast<P4HIR::SymToValueOp>(op)) {
+                // TODO check root reference?
+                mlir::StringAttr sym = symOp.getDecl().getLeafReference();
+                auto it = symMapping.find(sym);
+                assert(it != symMapping.end());
+                auto val = irMapping.lookupOrDefault(it->second);
+                rewriter.replaceOp(symOp, mlir::ValueRange(val));
+            }
+        });
+
+        return func;
     }
 
-    void createInitFn() {
+    void createInitFunction() {
         mlir::OpBuilder::InsertionGuard guard(rewriter);
         rewriter.setInsertionPointToStart(mod.getBody());
 
-        auto [func, mapping] = createFn(LLVM::LLVMVoidType::get(ctx), specialInitFn(op), true);
+        auto cb = [&](LLVM::LLVMFuncOp, mlir::IRMapping &mapping) {
+            for (mlir::Operation *op : initOps) {
+                rewriter.clone(*op, mapping);
+            }
+        };
 
-        for (mlir::Operation *op : initOps) {
-            rewriter.clone(*op, mapping);
-        }
+        createMemberFunction(LLVM::LLVMVoidType::get(ctx), specialInitFn(op), true, cb);
 
         rewriter.create<LLVM::ReturnOp>(loc, mlir::ValueRange());
     }
 
-    void createApplyFn() {
+    void createApplyFunction() {
         mlir::OpBuilder::InsertionGuard guard(rewriter);
         rewriter.setInsertionPointToStart(mod.getBody());
 
-        auto [func, mapping] = createFn(retTy, specialApplyFn(op), true);
+        auto cb = [&](LLVM::LLVMFuncOp, mlir::IRMapping &mapping) {
+            for (mlir::Operation *op : applyOps) {
+                rewriter.clone(*op, mapping);
+            }
+        };
 
-        for (mlir::Operation *op : applyOps) {
-            rewriter.clone(*op, mapping);
-        }
+        createMemberFunction(retTy, specialApplyFn(op), true, cb);
     }
 
-    void createMemberFns() {
+    void createMemberFunctions() {
         auto getName = [&](mlir::Operation *fn) -> std::string {
             if (auto stateOp = mlir::dyn_cast<P4HIR::ParserStateOp>(fn)) {
                 return memberFn(nameFor(op), stateOp);
@@ -692,57 +947,63 @@ struct PCHelper {
             mlir::OpBuilder::InsertionGuard guard(rewriter);
             rewriter.setInsertionPointToStart(mod.getBody());
 
-            auto [func, mapping] = createFn(retTy, getName(fn), true);
+            auto cb = [&](LLVM::LLVMFuncOp func, mlir::IRMapping &mapping) {
+                rewriter.cloneRegionBefore(fn->getRegion(0), func.getBody(), func.getBody().end(),
+                                           mapping);
+            };
 
-            rewriter.cloneRegionBefore(fn->getRegion(0), func.getBody(), func.getBody().end(),
-                                       mapping);
+            auto func = createMemberFunction(retTy, getName(fn), true, cb);
 
-            auto it = func.getBody().begin();
-            rewriter.setInsertionPointToEnd(&*it);
-            rewriter.create<LLVM::BrOp>(func.getLoc(), &*std::next(it));
+            mlir::Block &entry = func.getBody().front();
+            rewriter.setInsertionPointToEnd(&entry);
+            rewriter.create<LLVM::BrOp>(func.getLoc(), entry.getNextNode());
         }
     }
 
-    mlir::Type stateTy;
-    mlir::Type retTy;
-    mlir::Type ptrTy;
+    void convert() {
+        init();
+        createInitFunction();
+        createApplyFunction();
+        createMemberFunctions();
+    }
 
-    mlir::ValueRange arguments;
-
-    llvm::SmallVector<mlir::Operation *, 4> localVars;
-    llvm::SmallVector<mlir::Type, 4> localTypes;
-    llvm::SmallVector<mlir::Operation *, 16> initOps;
-    llvm::SmallVector<mlir::Operation *, 16> constantOps;
-    llvm::SmallVector<mlir::Operation *, 16> applyOps;
-    llvm::SmallVector<mlir::Operation *, 16> methodOps;
-
+ private:
     const TypeConverter *converter;
     mlir::ConversionPatternRewriter &rewriter;
     mlir::Operation *op;
+    mlir::ValueRange arguments;
 
     mlir::Location loc;
     mlir::MLIRContext *ctx;
     mlir::ModuleOp mod;
+    mlir::Type retTy;
+    mlir::Type ptrTy;
+
+    llvm::DenseMap<mlir::StringRef, mlir::Value> symMap;
+    llvm::SmallVector<mlir::Operation *, 4> localVars;
+    llvm::SmallVector<mlir::Type, 4> localTypes;
+
+    llvm::SmallVector<mlir::Operation *, 16> initOps;
+    llvm::SmallVector<mlir::Operation *, 16> constantOps;
+    llvm::SmallVector<mlir::Operation *, 16> applyOps;
+    llvm::SmallVector<mlir::Operation *, 16> methodOps;
 };
 
-struct ParserOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::ParserOp> {
-    using ConvertOpToLLVMPattern<P4HIR::ParserOp>::ConvertOpToLLVMPattern;
+template <typename OpTy>
+struct ParserOrControlConversion : public ConvertOpToLLVMPattern<OpTy> {
+    using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
 
-    mlir::LogicalResult matchAndRewrite(P4HIR::ParserOp op, OpAdaptor adaptor,
+    mlir::LogicalResult matchAndRewrite(OpTy op,
+                                        typename ConvertOpToLLVMPattern<OpTy>::OpAdaptor adaptor,
                                         mlir::ConversionPatternRewriter &rewriter) const override {
-        llvm::SmallVector<mlir::Type, 4> parserLocalTypes;
-
-        PCHelper pca(getTypeConverter(), rewriter, op);
-        pca.arguments = op.getArguments();
+        ParserOrControlConversionHelper pca(this->getTypeConverter(), rewriter, op,
+                                            op.getArguments());
 
         for (mlir::Operation &op : op.getBody().front()) {
             pca.add(&op);
         }
 
-        pca.init();
-        pca.createInitFn();
-        pca.createApplyFn();
-        pca.createMemberFns();
+        pca.convert();
 
         rewriter.eraseOp(op);
 
@@ -750,6 +1011,44 @@ struct ParserOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::ParserOp>
     }
 };
 
+struct ControlApplyOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::ControlApplyOp> {
+    using ConvertOpToLLVMPattern<P4HIR::ControlApplyOp>::ConvertOpToLLVMPattern;
+
+    mlir::LogicalResult matchAndRewrite(P4HIR::ControlApplyOp op, OpAdaptor adaptor,
+                                        mlir::ConversionPatternRewriter &rewriter) const override {
+        auto parent = op->getParentOfType<LLVM::LLVMFuncOp>();
+        if (!parent) return mlir::failure();
+
+        if (!op.getBody().empty()) {
+            rewriter.inlineRegionBefore(op.getBody(), parent.getBody(), parent.end());
+            rewriter.replaceOpWithNewOp<LLVM::BrOp>(op, op->getBlock()->getNextNode());
+        } else {
+            rewriter.replaceOpWithNewOp<LLVM::ReturnOp>(op, mlir::ValueRange());
+        }
+
+        // TODO we should address terminators in control_apply in general (see flatten-cfg).
+        if (!parent.getBody().back().mightHaveTerminator()) {
+            rewriter.setInsertionPointToEnd(&parent.getBody().back());
+            rewriter.create<LLVM::ReturnOp>(op->getLoc(), mlir::ValueRange());
+        }
+
+        return mlir::success();
+    }
+};
+
+struct ControlLocalOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::ControlLocalOp> {
+    using ConvertOpToLLVMPattern<P4HIR::ControlLocalOp>::ConvertOpToLLVMPattern;
+
+    mlir::LogicalResult matchAndRewrite(P4HIR::ControlLocalOp op, OpAdaptor adaptor,
+                                        mlir::ConversionPatternRewriter &rewriter) const override {
+        // Locals are handled during ParserOrControlConversion. Erase them once we're done.
+        rewriter.eraseOp(op);
+        return mlir::success();
+    }
+};
+
+// Helper function to do a parser state transition with a tail call.
+// Can only be called from parser states that have been converted to LLVM functions.
 mlir::Operation *createTailCallStateTransition(mlir::Operation *op, mlir::SymbolRefAttr state,
                                                mlir::ConversionPatternRewriter &rewriter) {
     auto parent = op->getParentOfType<LLVM::LLVMFuncOp>();
@@ -772,6 +1071,7 @@ struct ParserTransitionOpConversion
                                         mlir::ConversionPatternRewriter &rewriter) const override {
         auto returnOp = createTailCallStateTransition(op, op.getState(), rewriter);
         if (!returnOp) return mlir::failure();
+
         rewriter.replaceOp(op, returnOp);
         return mlir::success();
     }
@@ -783,49 +1083,33 @@ struct ParserTransitionSelectOpConversion
 
     mlir::LogicalResult matchAndRewrite(P4HIR::ParserTransitionSelectOp op, OpAdaptor adaptor,
                                         mlir::ConversionPatternRewriter &rewriter) const override {
-        mlir::Block *termBlock = op->getBlock();
-        mlir::Region *region = termBlock->getParent();
-        auto loc = op.getLoc();
+        auto parent = op->getParentOfType<LLVM::LLVMFuncOp>();
+        if (!parent) return mlir::failure();
 
-        auto convertSelectCase = [&](mlir::Block *block, P4HIR::ParserSelectCaseOp caseOp) {
-            mlir::Block *continueBlock = nullptr;
-            rewriter.setInsertionPointToEnd(block);
+        auto parentName = parent->getAttrOfType<mlir::StringAttr>("member_of");
+        if (!parentName) return mlir::failure();
 
-            if (!caseOp.isDefault()) {
-                mlir::Block *thenBlock = rewriter.createBlock(region, ++Region::iterator(block));
-                continueBlock = rewriter.createBlock(region, ++Region::iterator(thenBlock));
+        mlir::Region *region = op->getParentRegion();
+        mlir::Block *block = &region->back();
+        assert((block == op->getBlock()) && "Expected terminator to be in the last block");
 
-                auto yield = mlir::cast<P4HIR::YieldOp>(caseOp.getBody()->getTerminator());
-                rewriter.inlineBlockBefore(caseOp.getBody(), block, block->begin());
+        mlir::Block *newBlock = rewriter.createBlock(region, region->end());
+        rewriter.setInsertionPointToEnd(block);
+        rewriter.create<LLVM::BrOp>(op.getLoc(), newBlock);
+        block = newBlock;
 
-                rewriter.setInsertionPoint(yield);
-                auto cond = createKeyCondition(yield.getOperand(0), op.getSelect(), rewriter);
-                rewriter.create<LLVM::CondBrOp>(caseOp.getLoc(), cond, thenBlock, continueBlock);
-                rewriter.eraseOp(yield);
-                rewriter.setInsertionPointToStart(thenBlock);
-            }
-
-            createTailCallStateTransition(op, caseOp.getState(), rewriter);
-
-            return continueBlock;
-        };
-
-        mlir::Block *newBlock = rewriter.createBlock(region, ++Region::iterator(termBlock));
-        rewriter.setInsertionPointToEnd(termBlock);
-        rewriter.create<LLVM::BrOp>(loc, newBlock);
-
-        mlir::Block *block = newBlock;
         for (auto caseOp : op.selects()) {
-            block = convertSelectCase(block, caseOp);
+            block = convertSelectCase(block, op.getSelect(), caseOp, rewriter);
+            if (!block) break;
         }
 
-        // Remaining cases not covered by a default statement.
         if (block) {
+            // Handles remaining cases not covered by a default statement.
             // TODO check specification.
             rewriter.setInsertionPointToEnd(block);
             mlir::Value retVal =
-                rewriter.create<LLVM::ConstantOp>(loc, rewriter.getBoolAttr(false));
-            rewriter.create<LLVM::ReturnOp>(loc, mlir::ValueRange(retVal));
+                rewriter.create<LLVM::ConstantOp>(op.getLoc(), rewriter.getBoolAttr(false));
+            rewriter.create<LLVM::ReturnOp>(op.getLoc(), mlir::ValueRange(retVal));
         }
 
         rewriter.eraseOp(op);
@@ -833,20 +1117,57 @@ struct ParserTransitionSelectOpConversion
         return mlir::success();
     }
 
+    // Helper to convert the select case `caseOp`.
+    // `block` should be an unterminated block where the code for this case will be appended.
+    // If not a default case, a new unterminated block is returned.
+    mlir::Block *convertSelectCase(mlir::Block *block, mlir::Value selectArg,
+                                   P4HIR::ParserSelectCaseOp caseOp,
+                                   mlir::ConversionPatternRewriter &rewriter) const {
+        mlir::Region *region = block->getParent();
+        mlir::Block *continueBlock = nullptr;
+
+        if (caseOp.isDefault()) {
+            // The default state transition will be added as a terminator in the last block.
+            rewriter.setInsertionPointToEnd(block);
+        } else {
+            // Create if-then for current case.
+            mlir::Block *thenBlock = rewriter.createBlock(region, region->end());
+            continueBlock = rewriter.createBlock(region, region->end());
+
+            // Inline keyset expression to last block.
+            auto yield = mlir::cast<P4HIR::YieldOp>(caseOp.getBody()->getTerminator());
+            rewriter.inlineBlockBefore(caseOp.getBody(), block, block->begin());
+
+            // Replace yield with conditional jump.
+            rewriter.setInsertionPoint(yield);
+            auto cond = createKeyCondition(yield.getOperand(0), selectArg, rewriter);
+            rewriter.create<LLVM::CondBrOp>(caseOp.getLoc(), cond, thenBlock, continueBlock);
+            rewriter.eraseOp(yield);
+
+            // The state transition will be added in the then block.
+            rewriter.setInsertionPointToStart(thenBlock);
+        }
+
+        createTailCallStateTransition(caseOp, caseOp.getState(), rewriter);
+
+        return continueBlock;
+    }
+
     // Helper to create a condition for select arguments and the yield key values.
     mlir::Value createKeyCondition(mlir::Value selectKey, mlir::Value selectArg,
                                    mlir::ConversionPatternRewriter &rewriter) const {
         auto intType =
-            mlir::cast<mlir::IntegerType>(typeConverter->convertType(selectArg.getType()));
+            mlir::cast<mlir::IntegerType>(getTypeConverter()->convertType(selectArg.getType()));
 
-        // The argument will be materialized in the future, insert UnrealizedConversionCastOp.
-        auto asUnmaterialized = [&](mlir::Type desiredType, mlir::Value value) {
+        // Use unrealized conversion cast in order to emit keyset expressions in LLVM Dialect rather
+        // than P4HIR.
+        auto asUnrealized = [&](mlir::Type desiredType, mlir::Value value) {
             mlir::Operation *ucc = rewriter.create<mlir::UnrealizedConversionCastOp>(
                 value.getLoc(), desiredType, mlir::ValueRange(value));
             return ucc->getResult(0);
         };
 
-        selectArg = asUnmaterialized(intType, selectArg);
+        selectArg = asUnrealized(intType, selectArg);
 
         if (auto constOp = selectKey.getDefiningOp<P4HIR::ConstOp>()) {
             mlir::Value cmpVal;
@@ -856,6 +1177,10 @@ struct ParserTransitionSelectOpConversion
                     auto setVal = P4HIR::getConstantInt(setAttr.getMembers()[0]).value();
                     auto attr = mlir::IntegerAttr::get(intType, setVal);
                     cmpVal = rewriter.create<LLVM::ConstantOp>(selectKey.getLoc(), attr);
+                } else {
+                    // TODO support all.
+                    llvm_unreachable("Unsupported constant set attribute");
+                    return {};
                 }
             }
 
@@ -863,44 +1188,35 @@ struct ParserTransitionSelectOpConversion
                                                  selectArg, cmpVal);
         } else if (auto setOp = selectKey.getDefiningOp<P4HIR::SetOp>()) {
             assert(setOp.getInput().size() == 1);
-            auto cmpVal = asUnmaterialized(intType, setOp.getInput()[0]);
+            auto cmpVal = asUnrealized(intType, setOp.getInput()[0]);
             rewriter.eraseOp(setOp);
             return rewriter.create<LLVM::ICmpOp>(selectKey.getLoc(), LLVM::ICmpPredicate::eq,
                                                  selectArg, cmpVal);
         } else if (auto rangeOp = selectKey.getDefiningOp<P4HIR::RangeOp>()) {
             bool isSigned = mlir::cast<P4HIR::BitsType>(selectArg.getType()).isSigned();
-            auto lhs = asUnmaterialized(intType, rangeOp.getLhs());
-            auto rhs = asUnmaterialized(intType, rangeOp.getRhs());
+            auto lhs = asUnrealized(intType, rangeOp.getLhs());
+            auto rhs = asUnrealized(intType, rangeOp.getRhs());
             auto le = isSigned ? LLVM::ICmpPredicate::sle : LLVM::ICmpPredicate::ule;
             auto lowerBound = rewriter.create<LLVM::ICmpOp>(selectKey.getLoc(), le, lhs, selectArg);
             auto upperBound = rewriter.create<LLVM::ICmpOp>(selectKey.getLoc(), le, selectArg, rhs);
             return rewriter.create<LLVM::AndOp>(selectKey.getLoc(), lowerBound, upperBound);
         } else {
+            // TODO support all.
             llvm_unreachable("Unsupported yield value");
             return {};
         }
     }
 };
 
-struct ParserAcceptOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::ParserAcceptOp> {
-    using ConvertOpToLLVMPattern<P4HIR::ParserAcceptOp>::ConvertOpToLLVMPattern;
+template <typename OpTy, bool Result>
+struct ParserAcceptRejectOpConversion : public ConvertOpToLLVMPattern<OpTy> {
+    using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
 
-    mlir::LogicalResult matchAndRewrite(P4HIR::ParserAcceptOp op, OpAdaptor adaptor,
+    mlir::LogicalResult matchAndRewrite(OpTy op,
+                                        typename ConvertOpToLLVMPattern<OpTy>::OpAdaptor adaptor,
                                         mlir::ConversionPatternRewriter &rewriter) const override {
         mlir::Value retVal =
-            rewriter.create<LLVM::ConstantOp>(op.getLoc(), rewriter.getBoolAttr(true));
-        rewriter.replaceOpWithNewOp<LLVM::ReturnOp>(op, retVal);
-        return mlir::success();
-    }
-};
-
-struct ParserRejectOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::ParserRejectOp> {
-    using ConvertOpToLLVMPattern<P4HIR::ParserRejectOp>::ConvertOpToLLVMPattern;
-
-    mlir::LogicalResult matchAndRewrite(P4HIR::ParserRejectOp op, OpAdaptor adaptor,
-                                        mlir::ConversionPatternRewriter &rewriter) const override {
-        mlir::Value retVal =
-            rewriter.create<LLVM::ConstantOp>(op.getLoc(), rewriter.getBoolAttr(false));
+            rewriter.create<LLVM::ConstantOp>(op.getLoc(), rewriter.getBoolAttr(Result));
         rewriter.replaceOpWithNewOp<LLVM::ReturnOp>(op, retVal);
         return mlir::success();
     }
@@ -932,7 +1248,8 @@ void configureP4HIRToLLVMTypeConverter(mlir::TypeConverter &converter) {
         auto types = llvm::map_to_vector(structType.getFields(), [&](const auto &member) {
             return converter.convertType(member.type);
         });
-        return LLVM::LLVMStructType::getLiteral(structType.getContext(), types, true);
+        return LLVM::LLVMStructType::getNewIdentified(structType.getContext(), structType.getName(),
+                                                      types, true);
     });
 
     converter.addConversion([&](mlir::TupleType tupleType) {
@@ -945,6 +1262,22 @@ void configureP4HIRToLLVMTypeConverter(mlir::TypeConverter &converter) {
     converter.addConversion([&](P4HIR::ArrayType arrayType) {
         auto newElementType = converter.convertType(arrayType.getElementType());
         return LLVM::LLVMArrayType::get(newElementType, arrayType.getSize());
+    });
+
+    converter.addConversion([&](P4HIR::StringType stringType) {
+        // Assuming we convert string to null terminated pointers.
+        return LLVM::LLVMPointerType::get(stringType.getContext());
+    });
+
+    converter.addConversion([&](P4HIR::ErrorType errorType) {
+        // This is temporary.
+        return mlir::IntegerType::get(errorType.getContext(), 32);
+    });
+
+    converter.addConversion([&](P4HIR::ExternType externType) {
+        // This is temporary.
+        auto name = (llvm::Twine("_e_") + externType.getName()).str();
+        return LLVM::LLVMStructType::getIdentified(externType.getContext(), name);
     });
 
     converter.addConversion([&](P4HIR::ValidBitType validBitType) {
@@ -982,18 +1315,23 @@ void LowerP4HIRToLLVMPass::runOnOperation() {
 
 void P4HIR::populateP4HIRToLLVMConversionPatterns(mlir::LLVMTypeConverter &converter,
                                                   mlir::RewritePatternSet &patterns) {
-    patterns
-        .add<FuncLikeOpConversion<P4HIR::FuncOp>, CallLikeOpConversion<P4HIR::CallOp>,
-             ExternOpConversion, ReturnOpConversion, ConstOpConversion, VariableOpConversion,
-             UnaryOpConversion, BrOpConversion, CondBrOpConversion, BinOpConversion,
-             ShiftOpConversion<P4HIR::ShlOp>, ShiftOpConversion<P4HIR::ShrOp>, CmpOpConversion,
-             CastOpConversion, ReadOpConversion, AssignOpConversion, ArrayGetOpConversion,
-             ArrayElementRefOpConversion, StructExtractLikeOpConversion<P4HIR::StructExtractOp>,
-             StructExtractLikeOpConversion<P4HIR::TupleExtractOp>, ConcatOpConversion,
-             StructLikeOpConversion<P4HIR::ArrayOp>, StructLikeOpConversion<P4HIR::StructOp>,
-             StructLikeOpConversion<P4HIR::TupleOp>, StructExtractRefOpConversion,
-             ParserOpConversion, ParserTransitionOpConversion, ParserTransitionSelectOpConversion,
-             ParserAcceptOpConversion, ParserRejectOpConversion>(converter);
+    patterns.add<FuncLikeOpConversion<P4HIR::FuncOp>, CallLikeOpConversion<P4HIR::CallOp>,
+                 CallMethodOpConversion, ExternOpConversion, OverloadSetOpConversion,
+                 PackageOpConversion, InstantiateOpConversion, ConstructOpConversion,
+                 ReturnOpConversion, ConstOpConversion, VariableOpConversion, UnaryOpConversion,
+                 BrOpConversion, CondBrOpConversion, BinOpConversion,
+                 ShiftOpConversion<P4HIR::ShlOp>, ShiftOpConversion<P4HIR::ShrOp>, CmpOpConversion,
+                 CastOpConversion, ReadOpConversion, AssignOpConversion, ArrayGetOpConversion,
+                 ArrayElementRefOpConversion, StructExtractLikeOpConversion<P4HIR::StructExtractOp>,
+                 StructExtractLikeOpConversion<P4HIR::TupleExtractOp>, ConcatOpConversion,
+                 StructLikeOpConversion<P4HIR::ArrayOp>, StructLikeOpConversion<P4HIR::StructOp>,
+                 StructLikeOpConversion<P4HIR::TupleOp>, StructExtractRefOpConversion,
+                 ParserOrControlConversion<P4HIR::ParserOp>,
+                 ParserOrControlConversion<P4HIR::ControlOp>, ControlApplyOpConversion,
+                 ControlLocalOpConversion, ParserTransitionOpConversion,
+                 ParserTransitionSelectOpConversion,
+                 ParserAcceptRejectOpConversion<P4HIR::ParserAcceptOp, true>,
+                 ParserAcceptRejectOpConversion<P4HIR::ParserRejectOp, false>>(converter);
 }
 
 std::unique_ptr<Pass> P4::P4MLIR::createLowerP4HIRToLLVMPass() {
