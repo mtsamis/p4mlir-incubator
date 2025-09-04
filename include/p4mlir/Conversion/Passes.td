@@ -26,4 +26,10 @@ def LowerP4HIRToLLVM : Pass<"lower-p4hir-to-llvm", "mlir::ModuleOp"> {
   let dependentDialects = ["LLVM::LLVMDialect"];
 }
 
+def LowerToLLVM : Pass<"lower-to-llvm", "mlir::ModuleOp"> {
+  let summary = "Convert the P4HIR and CoreLib to the LLVM dialect";
+  let constructor = "::P4::P4MLIR::createLowerToLLVMPass()";
+  let dependentDialects = ["LLVM::LLVMDialect"];
+}
+
 #endif // P4MLIR_CONVERSION_PASSES_TD

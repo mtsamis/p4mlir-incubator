@@ -17,6 +17,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
+#include "p4mlir/Conversion/P4ToLLVM.h"
 
 namespace mlir {
 class LLVMTypeConverter;
@@ -29,17 +30,22 @@ namespace P4::P4MLIR {
 
 #define GEN_PASS_DECL_LOWERTOP4CORELIB
 #define GEN_PASS_DECL_LOWERP4HIRTOLLVM
+#define GEN_PASS_DECL_LOWERTOLLVM
 #include "p4mlir/Conversion/Passes.h.inc"
 
 std::unique_ptr<mlir::Pass> createLowerToP4CoreLibPass();
 std::unique_ptr<mlir::Pass> createLowerP4HIRToLLVMPass();
+std::unique_ptr<mlir::Pass> createLowerToLLVMPass();
 
 // TODO move these elsewhere.
 namespace P4HIR {
-void populateP4HIRToLLVMConversionPatterns(mlir::LLVMTypeConverter &converter,
+void populateP4HIRToLLVMConversionPatterns(P4::P4ToLLVM::P4LLVMTypeConverter &converter,
                                            mlir::RewritePatternSet &patterns);
+void configureP4HIRToLLVMTypeConverter(P4::P4ToLLVM::P4LLVMTypeConverter &converter);
 
-void registerConvertP4HIRToLLVMInterface(mlir::DialectRegistry &registry);
+void populateCoreLibToLLVMConversionPatterns(P4::P4ToLLVM::P4LLVMTypeConverter &converter,
+                                           mlir::RewritePatternSet &patterns);
+void configureCoreLibToLLVMTypeConverter(P4::P4ToLLVM::P4LLVMTypeConverter &converter);
 }  // namespace P4HIR
 
 // Generate the code for registering conversion passes.
