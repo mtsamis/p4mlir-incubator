@@ -3,16 +3,17 @@
 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
-#include "mlir/Transforms/DialectConversion.h"
 #include <type_traits>
+
 #include "llvm/Support/Casting.h"
-#include "p4mlir/Dialect/P4HIR/P4HIR_Ops.h"
-#include "p4mlir/Dialect/P4HIR/P4HIR_TypeInterfaces.h"
-#include "p4mlir/Dialect/P4HIR/P4HIR_Types.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
-#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Transforms/DialectConversion.h"
+#include "p4mlir/Dialect/P4HIR/P4HIR_Ops.h"
+#include "p4mlir/Dialect/P4HIR/P4HIR_TypeInterfaces.h"
+#include "p4mlir/Dialect/P4HIR/P4HIR_Types.h"
 
 namespace P4::P4ToLLVM {
 
@@ -44,9 +45,9 @@ inline std::string memberFn(llvm::StringRef parent, P4HIR::FuncOp funcOp) {
     return memberFn(parent, funcOp.getSymName());
 }
 
-inline std::string specialInitFn(llvm::StringRef parent) { return memberFn(parent, "_init"); }
-
-inline std::string specialInitFn(mlir::Operation *parent) { return specialInitFn(nameFor(parent)); }
+inline std::string specialInitFn(mlir::Operation *parent) {
+    return memberFn(nameFor(parent), mlir::cast<mlir::SymbolOpInterface>(parent).getName());
+}
 
 inline std::string specialApplyFn(llvm::StringRef parent) { return memberFn(parent, "_apply"); }
 
@@ -69,43 +70,74 @@ class P4Obj {
         return res;
     }
 
-    static P4Obj createAggregateImpl(mlir::MLIRContext *ctx, const std::string &name, mlir::TypeRange types, llvm::function_ref<P4Obj(mlir::Type)> createFn) {
+    static P4Obj createAggregateImpl(mlir::MLIRContext *ctx, const std::string &name,
+                                     mlir::TypeRange types,
+                                     llvm::function_ref<P4Obj(mlir::Type)> createFn) {
         P4Obj res;
         res.name = name;
-        for (mlir::Type type : types)
-            res.members.push_back(createFn(type));
-        
-        auto llvmTypes = llvm::map_to_vector(res.members, [&](auto &member) { return member.llvmType; });
+        for (mlir::Type type : types) res.members.push_back(createFn(type));
+
+        auto llvmTypes =
+            llvm::map_to_vector(res.members, [&](auto &member) { return member.llvmType; });
         res.llvmType = LLVM::LLVMStructType::getNewIdentified(ctx, name, llvmTypes, true);
-        
+
         return res;
     }
 
-    static P4Obj createAggregate(mlir::MLIRContext *ctx, const std::string &name, mlir::TypeRange llvmTypes) {
-        return createAggregateImpl(ctx, name, llvmTypes, [&](mlir::Type llvmType) {
-            return create(llvmType);
-        });
+    static P4Obj createAggregate(mlir::MLIRContext *ctx, const std::string &name,
+                                 mlir::TypeRange llvmTypes) {
+        return createAggregateImpl(ctx, name, llvmTypes,
+                                   [&](mlir::Type llvmType) { return create(llvmType); });
     }
 
-    static P4Obj createAggregate(mlir::MLIRContext *ctx, const std::string &name, const TypeConverter *converter, mlir::TypeRange p4Types) {
-        return createAggregateImpl(ctx, name, p4Types, [&](mlir::Type p4Type) {
-            return create(converter, p4Type);
-        });
+    static P4Obj createAggregate(mlir::MLIRContext *ctx, const std::string &name,
+                                 const TypeConverter *converter, mlir::TypeRange p4Types) {
+        return createAggregateImpl(ctx, name, p4Types,
+                                   [&](mlir::Type p4Type) { return create(converter, p4Type); });
+    }
+
+    static P4Obj fromStructP4(mlir::MLIRContext *ctx, const TypeConverter *converter,
+                              mlir::Type type) {
+        auto p4StructType = mlir::cast<P4HIR::StructLikeTypeInterface>(type);
+        auto memberTypes = llvm::map_to_vector(p4StructType.getFields(),
+                                               [](const auto &member) { return member.type; });
+        return createAggregateImpl(
+            ctx, p4StructType.getName().str(), memberTypes, [&](mlir::Type p4Type) {
+                if (auto structMember = mlir::dyn_cast<P4HIR::StructLikeTypeInterface>(p4Type)) {
+                    return fromStructP4(ctx, converter, structMember);
+                } else {
+                    return create(converter, p4Type);
+                }
+            });
+    }
+
+    static P4Obj fromStructLLVM(mlir::MLIRContext *ctx, mlir::Type type) {
+        auto llvmStructType = mlir::cast<LLVM::LLVMStructType>(type);
+        return createAggregateImpl(
+            ctx, llvmStructType.getName().str(), llvmStructType.getBody(),
+            [&](mlir::Type llvmType) {
+                if (auto structMember = mlir::dyn_cast<LLVM::LLVMStructType>(llvmType)) {
+                    return fromStructLLVM(ctx, structMember);
+                } else {
+                    return create(llvmType);
+                }
+            });
     }
 
     struct ObjAccess {
-        template<typename... Indices,
-                 typename std::enable_if_t<(std::is_convertible_v<Indices, size_t> && ...), bool> = true>
-        ObjAccess getMember(Indices... indices) {
-            size_t tempArr[] = {indices...};
+        template <
+            typename... Indices,
+            typename std::enable_if_t<(std::is_convertible_v<Indices, size_t> && ...), bool> = true>
+        ObjAccess getMember(Indices... indices) const {
+            size_t tempArr[] = {static_cast<size_t>(indices)...};
             return getMember(tempArr, sizeof...(Indices));
         }
 
-        ObjAccess getMember(SmallVectorImpl<size_t> &indices) {
+        ObjAccess getMember(SmallVectorImpl<size_t> &indices) const {
             return getMember(indices.data(), indices.size());
         }
 
-        ObjAccess getMember(const size_t *indices, size_t count) {
+        ObjAccess getMember(const size_t *indices, size_t count) const {
             ObjAccess res;
             res.root = root;
             res.rootPtr = rootPtr;
@@ -118,19 +150,27 @@ class P4Obj {
             return res;
         }
 
-        mlir::Value getPtrLLVM(mlir::RewriterBase &rewriter, mlir::Location loc) {
+        mlir::Value getPtrLLVM(mlir::RewriterBase &rewriter, mlir::Location loc) const {
             auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-            auto gepOp = rewriter.create<LLVM::GEPOp>(loc, ptrType, root->llvmType, rootPtr, gepArgs);
+            auto gepOp =
+                rewriter.create<LLVM::GEPOp>(loc, ptrType, root->llvmType, rootPtr, gepArgs);
             return gepOp.getRes();
         }
 
-        mlir::Value getValueLLVM(mlir::RewriterBase &rewriter, mlir::Location loc) {
+        mlir::Value getValueLLVM(mlir::RewriterBase &rewriter, mlir::Location loc) const {
             auto ptr = getPtrLLVM(rewriter, loc);
             auto loadOp = rewriter.create<LLVM::LoadOp>(loc, member->llvmType, ptr);
             return loadOp.getRes();
         }
 
-        mlir::Value getPtrP4(mlir::RewriterBase &rewriter, mlir::Location loc) {
+        void setValueLLVM(mlir::RewriterBase &rewriter, mlir::Location loc, mlir::Value val) const {
+            assert((member->llvmType == val.getType()) &&
+                   "Member type and write value type are not equal");
+            auto ptr = getPtrLLVM(rewriter, loc);
+            rewriter.create<LLVM::StoreOp>(loc, val, ptr);
+        }
+
+        mlir::Value getPtrP4(mlir::RewriterBase &rewriter, mlir::Location loc) const {
             assert(member->p4Type && "Missing P4 type");
             auto resType = P4HIR::ReferenceType::get(rewriter.getContext(), member->p4Type);
             auto llvmPtr = getPtrLLVM(rewriter, loc);
@@ -139,10 +179,11 @@ class P4Obj {
             return res->getResult(0);
         }
 
-        mlir::Value getValueP4(mlir::RewriterBase &rewriter, mlir::Location loc) {
+        mlir::Value getValueP4(mlir::RewriterBase &rewriter, mlir::Location loc) const {
             assert(member->p4Type && "Missing P4 type");
             auto llvmValue = getValueLLVM(rewriter, loc);
-            auto res = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, member->p4Type, llvmValue);
+            auto res =
+                rewriter.create<mlir::UnrealizedConversionCastOp>(loc, member->p4Type, llvmValue);
             assert(res->getNumResults() == 1);
             return res->getResult(0);
         }
@@ -165,37 +206,25 @@ class P4Obj {
         return res;
     }
 
-    template<typename... Args>
+    template <typename... Args>
     ObjAccess getMember(mlir::Value ptr, Args... args) const {
         return thisObj(ptr).getMember(std::forward<Args>(args)...);
     }
 
     mlir::Value allocaLLVM(mlir::RewriterBase &rewriter, mlir::Location loc) const {
         auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-        auto one = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getIntegerType(64), rewriter.getI64IntegerAttr(1));
+        auto one = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getIntegerType(64),
+                                                     rewriter.getI64IntegerAttr(1));
         auto allocaOp = rewriter.create<LLVM::AllocaOp>(loc, ptrType, llvmType, one);
         auto thisPtr = allocaOp->getResult(0);
-        construct(thisPtr);
         return thisPtr;
-    }
-
-    static void constructHelper(ObjAccess obj) {
-        if (obj->isAggregate()) {
-            for (size_t i = 0; i < obj->members.size(); i++) {
-                constructHelper(obj.getMember(i));
-            }
-        } else {
-            // Call constructor etc.
-        }
-    }
-
-    void construct(mlir::Value thisPtr) const {
-        constructHelper(thisObj(thisPtr));
     }
 
     bool isAggregate() const { return !members.empty(); }
     size_t getMemberCount() const { return members.size(); }
     llvm::StringRef getName() const { return name; }
+    mlir::Type getTypeLLVM() const { return llvmType; }
+    mlir::Type getTypeP4() const { return p4Type; }
 
  private:
     std::vector<P4Obj> members;
@@ -218,7 +247,7 @@ class P4LLVMTypeConverter : public mlir::LLVMTypeConverter {
 
     P4Obj *getObjType(llvm::StringRef name) {
         auto it = defToObj.find(name);
-        return (it != defToObj.end())? it->second.get() : nullptr;
+        return (it != defToObj.end()) ? it->second.get() : nullptr;
     }
 
  private:
