@@ -56,7 +56,7 @@ struct PacketExtractOpConversion : public mlir::ConvertOpToLLVMPattern<P4CoreLib
             auto innerBit = validityBitObj.getMember(ptr, 0);
             auto constTrue = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getBoolAttr(true));
             innerBit.setValueLLVM(rewriter, loc, constTrue);
-            return 1;
+            return 8;
         }
 
         // TODO cleanup to do here :)
@@ -70,7 +70,15 @@ struct PacketExtractOpConversion : public mlir::ConvertOpToLLVMPattern<P4CoreLib
 
         // Memcpy for alignment (check if LLVM spec allows unaligned access w/o memcpy).
         auto tempType = rewriter.getIntegerType(bytesToRead * 8);
-        auto temp = P4Obj::create(tempType).allocaLLVM(rewriter, loc);
+
+        // auto temp = P4Obj::create(tempType).allocaLLVM(rewriter, loc);
+        auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+        auto one = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getIntegerType(64),
+                                                     rewriter.getI64IntegerAttr(1));
+        auto allocaOp = rewriter.create<LLVM::AllocaOp>(loc, ptrType, tempType, one);
+        auto temp = allocaOp->getResult(0);
+        // this alloca will be replaced anyway.
+
         auto src = packetIn.getMember(0).getValueLLVM(rewriter, loc);
         src = rewriter.create<LLVM::GEPOp>(loc, ptrTy, byteTy, src,
                                            ArrayRef<LLVM::GEPArg>{byteOffset});  // Check if ok.
@@ -131,7 +139,7 @@ struct PacketExtractOpConversion : public mlir::ConvertOpToLLVMPattern<P4CoreLib
         if (!structType) return mlir::failure();
 
         auto packetInObj = converter->getObjType("_core_packet_in");
-        auto headerObj = P4Obj::fromStructP4(rewriter.getContext(), getTypeConverter(), structType);
+        auto headerObj = P4Obj::fromStructP4(getTypeConverter(), structType);
         auto packetIn = packetInObj->thisObj(adaptor.getPacketIn());
         auto header = headerObj.thisObj(adaptor.getHdr());
 
@@ -171,8 +179,8 @@ void P4HIR::configureCoreLibToLLVMTypeConverter(P4LLVMTypeConverter &converter) 
 
     // struct packet_in {
     //     byte[] data;
-    //     unsigned nextBitIndex;
     //     unsigned lengthInBits;
+    //     unsigned nextBitIndex;
     // }
     auto ptrTy = LLVM::LLVMPointerType::get(&converter.getContext());
     auto unsignedTy = mlir::IntegerType::get(&converter.getContext(), 32);
