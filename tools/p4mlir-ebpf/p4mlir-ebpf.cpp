@@ -72,7 +72,7 @@ int processMLIR(mlir::OwningOpRef<mlir::ModuleOp> &module) {
     pm.addPass(createSerEnumEliminationPass());
     pm.addPass(createFlattenCFGPass());
     pm.addPass(mlir::createCanonicalizerPass());
-    pm.addPass(createLowerToLLVMPass());
+    pm.addPass(createLowerEBPFToLLVMPass());
     pm.addPass(mlir::createCanonicalizerPass());
 
     if (mlir::failed(pm.run(*module))) return -1;
