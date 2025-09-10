@@ -1,0 +1,10 @@
+rm -rf build
+mkdir build
+cd build
+../../../third_party/p4c/build/p4mlir-translate --typeinference-only $1 > ebpf_program.mlir
+../../../third_party/p4c/build/extensions/p4mlir/bin/p4mlir-ebpf ebpf_program.mlir > ebpf_program.ll
+clang -O2 -g -gdwarf-5 -I/usr/src/kernels/6.16.4-200.fc42.x86_64/ -S -emit-llvm ../ebpf_runtime.c -o ebpf_runtime.ll
+llvm-link ebpf_program.ll ebpf_runtime.ll -o combined.ll
+opt -O3 combined.ll -o combined_opt.ll
+llc -march=bpf -filetype=obj -O2 combined_opt.ll -o ebpf_program.o
+cp ebpf_program.o ../ebpf_program.o
