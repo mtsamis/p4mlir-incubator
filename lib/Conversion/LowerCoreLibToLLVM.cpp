@@ -47,7 +47,7 @@ struct PacketExtractOpConversion : public mlir::ConvertOpToLLVMPattern<P4CoreLib
         : ConvertOpToLLVMPattern(converter), converter(&converter) {}
 
     size_t extractMemberImpl(mlir::RewriterBase &rewriter, mlir::Location loc,
-                             const P4Obj::ObjAccess &packetIn, size_t bitOffset,
+                             mlir::Value packetBytesPtr, size_t bitOffset,
                              const P4Obj::ObjAccess &dest) const {
         if (mlir::isa<P4HIR::ValidBitType>(dest->getTypeP4())) {
             // Validity bit is lowered as a one-element struct.
@@ -56,63 +56,62 @@ struct PacketExtractOpConversion : public mlir::ConvertOpToLLVMPattern<P4CoreLib
             auto innerBit = validityBitObj.getMember(ptr, 0);
             auto constTrue = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getBoolAttr(true));
             innerBit.setValueLLVM(rewriter, loc, constTrue);
-            return 8;
+            return 0;
         }
-
-        // TODO cleanup to do here :)
-        auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
-        auto byteTy = rewriter.getIntegerType(8);
 
         size_t destWidthBits = mlir::cast<mlir::IntegerType>(dest->getTypeLLVM()).getWidth();
         size_t destWidthBytes = (destWidthBits + 7) / 8;
         size_t byteOffset = bitOffset / 8;
-        size_t bytesToRead = llvm::NextPowerOf2(destWidthBytes);
+        size_t bytesToRead = llvm::PowerOf2Ceil(destWidthBytes);
 
-        // Memcpy for alignment (check if LLVM spec allows unaligned access w/o memcpy).
-        auto tempType = rewriter.getIntegerType(bytesToRead * 8);
+        [[maybe_unused]] std::string debugExpr;
+        LLVM_DEBUG(llvm::dbgs() << "Read " << destWidthBits << " bit field from offset "
+                                << bitOffset << " with read width " << bytesToRead << " bytes\n");
+        LLVM_DEBUG(debugExpr = (llvm::Twine("(u") + std::to_string(bytesToRead * 8) + ") data[" +
+                                std::to_string(byteOffset) + "]")
+                                   .str());
 
-        // auto temp = P4Obj::create(tempType).allocaLLVM(rewriter, loc);
+        auto byteType = rewriter.getIntegerType(8);
         auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-        auto one = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getIntegerType(64),
-                                                     rewriter.getI64IntegerAttr(1));
-        auto allocaOp = rewriter.create<LLVM::AllocaOp>(loc, ptrType, tempType, one);
-        auto temp = allocaOp->getResult(0);
-        // this alloca will be replaced anyway.
-
-        auto src = packetIn.getMember(0).getValueLLVM(rewriter, loc);
-        src = rewriter.create<LLVM::GEPOp>(loc, ptrTy, byteTy, src,
-                                           ArrayRef<LLVM::GEPArg>{byteOffset});  // Check if ok.
-        auto bytesToReadVal = rewriter.create<LLVM::ConstantOp>(
-            loc, rewriter.getIntegerType(64), rewriter.getI64IntegerAttr(bytesToRead));
-        rewriter.create<LLVM::MemcpyOp>(loc, temp, src, bytesToReadVal, false);
-        mlir::Value tempVal = rewriter.create<LLVM::LoadOp>(loc, tempType, temp).getRes();
+        auto src = rewriter.create<LLVM::GEPOp>(loc, ptrType, byteType, packetBytesPtr,
+                                                ArrayRef<LLVM::GEPArg>{byteOffset});
+        auto srcType = rewriter.getIntegerType(bytesToRead * 8);
+        auto srcVal = rewriter.create<LLVM::LoadOp>(loc, srcType, src).getRes();
 
         if ((bitOffset % 8) != 0) {
             auto shiftAmount = rewriter.create<LLVM::ConstantOp>(
-                loc, rewriter.getIntegerAttr(tempType, bitOffset % 8));
-            tempVal = rewriter.create<LLVM::LShrOp>(loc, tempVal, shiftAmount);
+                loc, rewriter.getIntegerAttr(srcType, bitOffset % 8));
+            srcVal = rewriter.create<LLVM::LShrOp>(loc, srcVal, shiftAmount);
+            LLVM_DEBUG(
+                debugExpr =
+                    (llvm::Twine("(") + debugExpr + ") >> " + std::to_string(bitOffset % 8)).str());
         }
 
-        if ((bytesToRead * 8) != destWidthBits)
-            tempVal = rewriter.create<LLVM::TruncOp>(loc, dest->getTypeLLVM(), tempVal);
+        if ((bytesToRead * 8) != destWidthBits) {
+            srcVal = rewriter.create<LLVM::TruncOp>(loc, dest->getTypeLLVM(), srcVal);
+            LLVM_DEBUG(debugExpr = (llvm::Twine("(u") + std::to_string(destWidthBits) + ") (" +
+                                    debugExpr + ")")
+                                       .str());
+        }
 
-        dest.setValueLLVM(rewriter, loc, tempVal);
+        LLVM_DEBUG(llvm::dbgs() << "With expr " << debugExpr << "\n");
+
+        dest.setValueLLVM(rewriter, loc, srcVal);
 
         return destWidthBits;
     }
 
-    size_t extractImpl(mlir::RewriterBase &rewriter, mlir::Location loc,
-                       const P4Obj::ObjAccess &packetIn, size_t bitOffset,
-                       P4Obj::ObjAccess dest) const {
+    size_t extractImpl(mlir::RewriterBase &rewriter, mlir::Location loc, mlir::Value packetBytesPtr,
+                       size_t bitOffset, P4Obj::ObjAccess dest) const {
         if (dest->isAggregate()) {
             size_t bitsConsumed = 0;
             for (size_t i = 0; i < dest->getMemberCount(); i++) {
-                bitsConsumed += extractImpl(rewriter, loc, packetIn, bitOffset + bitsConsumed,
+                bitsConsumed += extractImpl(rewriter, loc, packetBytesPtr, bitOffset + bitsConsumed,
                                             dest.getMember(i));
             }
             return bitsConsumed;
         } else {
-            return extractMemberImpl(rewriter, loc, packetIn, bitOffset, dest);
+            return extractMemberImpl(rewriter, loc, packetBytesPtr, bitOffset, dest);
         }
     }
 
@@ -129,28 +128,32 @@ struct PacketExtractOpConversion : public mlir::ConvertOpToLLVMPattern<P4CoreLib
         // }
         // this.nextBitIndex += bitsToExtract;
 
-        // TODO checks and other things missing, etc
-        // TODO clean up as well.
-        // TODO also optimize codegen a bit.
-        auto refType = mlir::dyn_cast<P4HIR::ReferenceType>(op.getHdr().getType());
-        if (!refType) return mlir::failure();
-
-        auto structType = mlir::dyn_cast<P4HIR::StructLikeTypeInterface>(refType.getObjectType());
-        if (!structType) return mlir::failure();
-
+        auto loc = op.getLoc();
         auto packetInObj = converter->getObjType("_core_packet_in");
-        auto headerObj = P4Obj::fromStructP4(getTypeConverter(), structType);
+        auto headerObj = converter->getObjType(removeRef(op.getHdr().getType()));
         auto packetIn = packetInObj->thisObj(adaptor.getPacketIn());
-        auto header = headerObj.thisObj(adaptor.getHdr());
+        auto header = headerObj->thisObj(adaptor.getHdr());
 
-        auto nextBitIndexMember = packetIn.getMember(1);
-        auto curNextBitIdx = nextBitIndexMember.getValueLLVM(rewriter, op.getLoc());
-        size_t bitsConsumed = extractImpl(rewriter, op.getLoc(), packetIn, 0, header);
+        auto nextBitIndexMember = packetIn.getMember(2);
+
+        auto packetBytesPtr = packetIn.getMember(0).getValueLLVM(rewriter, loc);
+        auto nextBitIndex = nextBitIndexMember.getValueLLVM(rewriter, loc);
+        auto bitsPerByteAttr = rewriter.getIntegerAttr(nextBitIndex.getType(), 8);
+        auto bitsPerByte = rewriter.create<LLVM::ConstantOp>(loc, bitsPerByteAttr);
+        auto nextByteIndex = rewriter.create<LLVM::UDivOp>(loc, nextBitIndex, bitsPerByte);
+        auto byteType = rewriter.getIntegerType(8);
+        auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+        packetBytesPtr = rewriter.create<LLVM::GEPOp>(
+            loc, ptrType, byteType, packetBytesPtr, ArrayRef<LLVM::GEPArg>{nextByteIndex.getRes()});
+
+        size_t bitsConsumed = extractImpl(rewriter, op.getLoc(), packetBytesPtr, 0, header);
+        assert((bitsConsumed % 8 == 0) && "Cannot extract non-byte-aligned data from packet_in");
+
         auto bitsConsumedVal = rewriter.create<LLVM::ConstantOp>(
-            op.getLoc(), rewriter.getI32IntegerAttr(bitsConsumed));
-        auto newNextBitIdx =
-            rewriter.create<LLVM::AddOp>(op.getLoc(), curNextBitIdx, bitsConsumedVal);
-        nextBitIndexMember.setValueLLVM(rewriter, op.getLoc(), newNextBitIdx);
+            op.getLoc(), rewriter.getIntegerAttr(nextBitIndex.getType(), bitsConsumed));
+        auto newNextBitIndex =
+            rewriter.create<LLVM::AddOp>(op.getLoc(), nextBitIndex, bitsConsumedVal);
+        nextBitIndexMember.setValueLLVM(rewriter, op.getLoc(), newNextBitIndex);
 
         rewriter.eraseOp(op);
 
