@@ -92,7 +92,7 @@ std::unique_ptr<llvm::Module> convertToLLVMIR(llvm::LLVMContext &llvmContext,
 
     bool enableOpt = true;
     auto optPipeline = mlir::makeOptimizingTransformer(
-        /*optLevel=*/enableOpt ? 3 : 0, /*sizeLevel=*/0,
+        /*optLevel=*/enableOpt ? 2 : 0, /*sizeLevel=*/0,
         /*targetMachine=*/nullptr);
     if (auto err = optPipeline(llvmMod.get())) {
         llvm::errs() << "Failed to optimize LLVM IR " << err << "\n";
@@ -121,20 +121,20 @@ int main(int argc, char **argv) {
     mlir::OwningOpRef<mlir::ModuleOp> mod;
     if (int error = loadMLIR(context, mod)) return error;
 
-    llvm::dbgs() << "Loaded module:\n";
-    mod->dump();
+    // llvm::dbgs() << "Loaded module:\n";
+    // mod->dump();
 
     if (int error = processMLIR(mod)) return error;
 
-    llvm::dbgs() << "After processing:\n";
-    mod->dump();
+    // llvm::dbgs() << "After processing:\n";
+    // mod->dump();
 
     llvm::LLVMContext llvmContext;
     auto llvmMod = convertToLLVMIR(llvmContext, *mod);
     if (!llvmMod) return -1;
 
-    llvm::dbgs() << "LLVM IR:\n";
-    llvm::dbgs() << *llvmMod << "\n";
+    // llvm::dbgs() << "LLVM IR:\n";
+    llvm::outs() << *llvmMod << "\n";
 
     return 0;
 }
