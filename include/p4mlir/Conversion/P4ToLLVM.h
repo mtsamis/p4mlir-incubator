@@ -174,10 +174,11 @@ class P4Obj {
         }
 
         mlir::Value getPtrLLVM(mlir::RewriterBase &rewriter, mlir::Location loc) const {
-            auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-            if (gepArgs.empty()) {
+            if (gepArgs.size() == 1) {
+                assert((mlir::cast<LLVM::GEPConstantIndex>(gepArgs[0]) == 0));
                 return rootPtr;
             } else {
+                auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
                 auto gepOp =
                     rewriter.create<LLVM::GEPOp>(loc, ptrType, root->llvmType, rootPtr, gepArgs);
                 return gepOp.getRes();
@@ -240,6 +241,7 @@ class P4Obj {
         res.rootPtr = ptr;
         res.member = this;
         res.root = this;
+        res.gepArgs.push_back(0);
         return res;
     }
 
@@ -248,15 +250,12 @@ class P4Obj {
         return thisObj(ptr).getMember(std::forward<Args>(args)...);
     }
 
-    ObjAccess allocaLLVM(mlir::RewriterBase &rewriter, mlir::Location loc) const {
+    mlir::Value allocaLLVM(mlir::RewriterBase &rewriter, mlir::Location loc) const {
         auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
         auto one = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getIntegerType(64),
                                                      rewriter.getI64IntegerAttr(1));
         auto allocaOp = rewriter.create<LLVM::AllocaOp>(loc, ptrType, llvmType, one);
-        auto thisPtr = allocaOp->getResult(0);
-        auto res = thisObj(thisPtr);
-        // res.gepArgs.push_back(0);
-        return res;
+        return allocaOp->getResult(0);
     }
 
     bool isAggregate() const { return !members.empty(); }
