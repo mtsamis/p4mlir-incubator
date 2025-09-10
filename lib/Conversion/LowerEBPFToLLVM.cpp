@@ -51,8 +51,8 @@ struct LowerEBPFToLLVMPass : public P4::P4MLIR::impl::LowerEBPFToLLVMBase<LowerE
 };
 
 struct InstantiateMainConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::InstantiateOp> {
-    InstantiateMainConversion(P4LLVMTypeConverter &converter)
-        : ConvertOpToLLVMPattern(converter), converter(&converter) {}
+    InstantiateMainConversion(P4LLVMTypeConverter &converter, PatternBenefit benefit = 1)
+        : ConvertOpToLLVMPattern(converter, benefit), converter(&converter) {}
 
     template <typename OpTy>
     static OpTy unwrapPackageArg(mlir::Value arg) {
@@ -73,13 +73,15 @@ struct InstantiateMainConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::In
         //   control filter<H>(inout H headers, out bool accept);
         //   package ebpfFilter<H>(parse<H> prs, filter<H> filt);
 
-        // The signature is `bool ebpf_filter(ptr packetStart, u32 packetLen)`
-        auto resTy = rewriter.getIntegerType(1);
+        // The signature is `u32 ebpf_filter(ptr packetStart, u32 packetLen)`
+        auto resTy = rewriter.getIntegerType(32);
         auto packetStartTy = rewriter.getType<LLVM::LLVMPointerType>();
         auto packetLenTy = rewriter.getIntegerType(32);
         auto funcType = LLVM::LLVMFunctionType::get(resTy, {packetStartTy, packetLenTy});
 
-        auto func = rewriter.create<LLVM::LLVMFuncOp>(loc, "ebpf_filter", funcType);
+        // TODO is there a linkage value that will eliminate the function only when/if inlined?
+        auto func = rewriter.create<LLVM::LLVMFuncOp>(loc, "P4MLIR_EBPF_FILTER_ENTRY", funcType);
+        func.setAlwaysInline(true);
         Block *entryBlock = func.addEntryBlock(rewriter);
         rewriter.setInsertionPointToStart(entryBlock);
 
@@ -94,30 +96,44 @@ struct InstantiateMainConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::In
 
             auto applyFnName = specialApplyFn(op);
             auto applyFn = mod.lookupSymbol<LLVM::LLVMFuncOp>(applyFnName);
-            rewriter.create<LLVM::CallOp>(loc, applyFn, args);
+            return rewriter.create<LLVM::CallOp>(loc, applyFn, args);
         };
 
-        auto parserObj = converter->getObjType(parser)->allocaLLVM(rewriter, loc);
-        auto packetInObj = converter->getObjType(removeRef(parser.getArgumentTypes()[0]))
-                               ->allocaLLVM(rewriter, loc);
-        auto headerObj = converter->getObjType(removeRef(parser.getArgumentTypes()[1]))
-                             ->allocaLLVM(rewriter, loc);
+        auto packetInObj = converter->getObjType(removeRef(parser.getArgumentTypes()[0]));
+        auto parserInst = converter->getObjType(parser)->allocaLLVM(rewriter, loc);
+        auto packetInInst = packetInObj->allocaLLVM(rewriter, loc);
+        auto headerInst = converter->getObjType(removeRef(parser.getArgumentTypes()[1]))
+                              ->allocaLLVM(rewriter, loc);
 
-        auto parserInst = parserObj.getPtrLLVM(rewriter, loc);
-        auto packetInInst = packetInObj.getPtrLLVM(rewriter, loc);
-        auto headerInst = headerObj.getPtrLLVM(rewriter, loc);
+        packetInObj->getMember(packetInInst, 0).setValueLLVM(rewriter, loc, func.getArgument(0));
+        auto bitsPerByteAttr = rewriter.getI32IntegerAttr(8);
+        auto bitsPerByte = rewriter.create<LLVM::ConstantOp>(loc, bitsPerByteAttr);
+        auto lengthInBits = rewriter.create<LLVM::MulOp>(loc, func.getArgument(1), bitsPerByte);
+        packetInObj->getMember(packetInInst, 1).setValueLLVM(rewriter, loc, lengthInBits);
+        auto nextBitIndexAttr = rewriter.getI32IntegerAttr(0);
+        auto nextBitIndex = rewriter.create<LLVM::ConstantOp>(loc, nextBitIndexAttr);
+        packetInObj->getMember(packetInInst, 2).setValueLLVM(rewriter, loc, nextBitIndex);
 
-        callApplyFn(parser, {parserInst, packetInInst, headerInst});
+        auto parserStatus = callApplyFn(parser, {parserInst, packetInInst, headerInst});
+        auto parserAcceptBlock = rewriter.createBlock(&func.getBody(), func.getBody().end());
+        auto parserRejectBlock = rewriter.createBlock(&func.getBody(), func.getBody().end());
 
-        auto filterObj = converter->getObjType(filter)->allocaLLVM(rewriter, loc);
-        auto outObj = P4Obj::create(resTy).allocaLLVM(rewriter, loc);  // TODO universal APIs
+        rewriter.setInsertionPointAfter(parserStatus);
+        rewriter.create<LLVM::CondBrOp>(loc, parserStatus.getResult(), parserAcceptBlock,
+                                        parserRejectBlock);
 
-        auto filterInst = filterObj.getPtrLLVM(rewriter, loc);
-        auto outInst = outObj.getPtrLLVM(rewriter, loc);
-
+        rewriter.setInsertionPointToStart(parserAcceptBlock);
+        auto filterInst = converter->getObjType(filter)->allocaLLVM(rewriter, loc);
+        auto outObj = P4Obj::create(converter, removeRef(filter.getArgumentTypes()[1]));
+        auto outInst = outObj.allocaLLVM(rewriter, loc);
         callApplyFn(filter, {filterInst, headerInst, outInst});
+        auto filterOut = outObj.thisObj(outInst).getValueLLVM(rewriter, loc);
+        auto resValue = rewriter.create<LLVM::ZExtOp>(loc, resTy, filterOut);
+        rewriter.create<LLVM::ReturnOp>(loc, resValue);
 
-        rewriter.create<LLVM::ReturnOp>(loc, outObj.getValueLLVM(rewriter, loc));
+        rewriter.setInsertionPointToStart(parserRejectBlock);
+        auto falseVal = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getIntegerAttr(resTy, 0));
+        rewriter.create<LLVM::ReturnOp>(loc, falseVal);
 
         return mlir::success();
     }
@@ -214,7 +230,7 @@ void LowerEBPFToLLVMPass::runOnOperation() {
                  EraseOpConversion<P4HIR::PackageOp>, EraseOpConversion<P4HIR::OverloadSetOp>,
                  EraseOpConversion<P4HIR::ConstructOp>,
                  /* EraseOpConversion<P4HIR::InstantiateOp>, */
-                 EraseOpConversion<P4HIR::CallMethodOp>>(typeConverter);
+                 EraseOpConversion<P4HIR::CallMethodOp>>(typeConverter, 0);
 
     if (mlir::failed(mlir::applyPartialConversion(mod, target, std::move(patterns))))
         signalPassFailure();
