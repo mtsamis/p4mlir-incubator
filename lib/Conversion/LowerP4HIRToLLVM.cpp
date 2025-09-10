@@ -80,7 +80,8 @@ struct FuncLikeOpConversion : public ConvertOpToLLVMPattern<OpTy> {
         if (!llvmFuncType) return rewriter.notifyMatchFailure(op, "Signature conversion failed");
 
         // TODO see what attributes we want to handle.
-        auto newFuncOp = rewriter.create<LLVM::LLVMFuncOp>(op.getLoc(), op.getName(), llvmFuncType);
+        auto newFuncOp = rewriter.create<LLVM::LLVMFuncOp>(op.getLoc(), op.getName(), llvmFuncType,
+                                                           LLVM::Linkage::Internal);
         cast<FunctionOpInterface>(newFuncOp.getOperation()).setVisibility(op.getVisibility());
 
         rewriter.inlineRegionBefore(op.getFunctionBody(), newFuncOp.getBody(), newFuncOp.end());
@@ -155,7 +156,7 @@ struct InstantiateOpConversion : public mlir::ConvertOpToLLVMPattern<P4HIR::Inst
         auto instTarget = mod.lookupSymbol(op.getCallee());
         if (!instTarget) return mlir::failure();
 
-        if (!mlir::isa<P4HIR::ParserOp, P4HIR::ControlOp>(instTarget))
+        if (!mlir::isa<P4HIR::ParserOp, P4HIR::ControlOp, P4HIR::ExternOp>(instTarget))
             return mlir::failure();
 
         instantiate(instTarget, adaptor.getArgOperands());
@@ -583,9 +584,10 @@ struct StructExtractRefOpConversion : public ConvertOpToLLVMPattern<P4HIR::Struc
     mlir::LogicalResult matchAndRewrite(P4HIR::StructExtractRefOp op, OpAdaptor adaptor,
                                         mlir::ConversionPatternRewriter &rewriter) const override {
         auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-        auto fieldType = getTypeConverter()->convertType(op.getFieldType());
-        rewriter.replaceOpWithNewOp<LLVM::GEPOp>(op, ptrType, fieldType, adaptor.getInput(),
-                                                 ArrayRef<LLVM::GEPArg>{adaptor.getFieldIndex()});
+        auto inputType = getTypeConverter()->convertType(removeRef(op.getInput().getType()));
+        rewriter.replaceOpWithNewOp<LLVM::GEPOp>(
+            op, ptrType, inputType, adaptor.getInput(),
+            ArrayRef<LLVM::GEPArg>{0, adaptor.getFieldIndex()});
         return mlir::success();
     }
 };
@@ -666,8 +668,7 @@ struct ParserOrControlConversionHelper {
         }
 
         auto funcType = LLVM::LLVMFunctionType::get(returnType, signature);
-        auto func = rewriter.create<LLVM::LLVMFuncOp>(loc, name, funcType);
-        func.setPrivate();
+        auto func = rewriter.create<LLVM::LLVMFuncOp>(loc, name, funcType, LLVM::Linkage::Internal);
         // Use a 'member_of' attribute to keep track that this is a member function of a particular
         // parser/control.
         func->setAttr("member_of", mlir::StringAttr::get(ctx, nameFor(op)));
