@@ -65,18 +65,6 @@ static inline void populateTypeConversionPattern(mlir::RewritePatternSet &patter
                                                  patterns.getContext());
 }
 
-template <typename... OpTypes>
-void populateP4HIRFunctionOpTypeConversionPattern(mlir::RewritePatternSet &patterns,
-                                                  const mlir::TypeConverter &converter) {
-    (patterns.addWithLabel<TypeOpConversionPattern<OpTypes>>(
-         {"function op type conversion", OpTypes::getOperationName()}, converter,
-         patterns.getContext()),
-     ...);
-}
-
-void populateP4HIRAnyCallOpTypeConversionPattern(mlir::RewritePatternSet &patterns,
-                                                 const mlir::TypeConverter &converter);
-
 }  // namespace P4::P4MLIR
 
 #endif  // P4MLIR_CONVERSION_CONVERSIONPATTERNS_H

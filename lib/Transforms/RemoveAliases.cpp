@@ -76,13 +76,7 @@ void RemoveAliasesPass::runOnOperation() {
     });
 
     RewritePatternSet patterns(&context);
-
-    // Translate call operands and results via type converter
-    populateP4HIRAnyCallOpTypeConversionPattern(patterns, typeConverter);
-    // Translate function-like ops signatures and types
-    populateP4HIRFunctionOpTypeConversionPattern<P4HIR::FuncOp, P4HIR::ParserOp, P4HIR::ControlOp>(
-        patterns, typeConverter);
-    patterns.add<TypeConversionPattern>(typeConverter, &context);
+    populateTypeConversionPattern(patterns, typeConverter);
 
     if (failed(applyPartialConversion(module, target, std::move(patterns)))) signalPassFailure();
 }

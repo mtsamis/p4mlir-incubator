@@ -12,22 +12,6 @@ using namespace mlir;
 
 using namespace P4::P4MLIR;
 
-namespace {
-struct AnyCallOpInterfaceConversionPattern : public OpInterfaceConversionPattern<CallOpInterface> {
-    using OpInterfaceConversionPattern<CallOpInterface>::OpInterfaceConversionPattern;
-
-    LogicalResult matchAndRewrite(CallOpInterface callOp, ArrayRef<Value> operands,
-                                  ConversionPatternRewriter &rewriter) const override {
-        FailureOr<Operation *> newOp =
-            doTypeConversion(callOp, operands, rewriter, getTypeConverter());
-        if (failed(newOp)) return failure();
-
-        return success();
-    }
-};
-
-}  // end anonymous namespace
-
 P4HIRTypeConverter::P4HIRTypeConverter() {
     addConversion([&](mlir::Type t) { return t; });
 
@@ -240,9 +224,4 @@ FailureOr<Operation *> P4::P4MLIR::doTypeConversion(Operation *op, ValueRange op
 
     rewriter.replaceOp(op, newOp->getResults());
     return newOp;
-}
-
-void P4::P4MLIR::populateP4HIRAnyCallOpTypeConversionPattern(mlir::RewritePatternSet &patterns,
-                                                             const mlir::TypeConverter &converter) {
-    patterns.add<AnyCallOpInterfaceConversionPattern>(converter, patterns.getContext());
 }
