@@ -54,6 +54,11 @@ P4HIRTypeConverter::P4HIRTypeConverter() {
                                    ArrayAttr::get(attr.getContext(), newMembers));
     });
 
+    addTypeAttributeConversion([&](P4HIR::EnumType enumType, P4HIR::EnumFieldAttr attr) {
+        if (isLegal(enumType)) return attr;
+        return P4HIR::EnumFieldAttr::get(convertType(enumType), attr.getField());
+    });
+
     addConversion([&](P4HIR::CtorType ctorType) {
         // Expect empty ctor args
         return P4HIR::CtorType::get(ctorType.getContext(), ctorType.getInputs(),
