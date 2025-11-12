@@ -20,6 +20,10 @@ def P4HIR_Dialect : Dialect {
     let useDefaultAttributePrinterParser = 1;
     let hasConstantMaterializer = 1;
 
+    let dependentDialects = [
+        "cf::ControlFlowDialect"
+    ];
+
     let extraClassDeclaration = [{
         mlir::Type parseType(mlir::DialectAsmParser &parser) const override;
         void printType(mlir::Type type, mlir::DialectAsmPrinter &printer) const override;

@@ -1,3 +1,4 @@
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "p4mlir/Transforms/Passes.h"
@@ -38,7 +39,7 @@ struct IfOpFlattening : public OpRewritePattern<P4HIR::IfOp> {
 
         rewriter.setInsertionPointToEnd(thenAfterBody);
         if (auto thenYieldOp = dyn_cast<P4HIR::YieldOp>(thenAfterBody->getTerminator())) {
-            rewriter.replaceOpWithNewOp<P4HIR::BrOp>(thenYieldOp, thenYieldOp.getArgs(),
+            rewriter.replaceOpWithNewOp<cf::BranchOp>(thenYieldOp, thenYieldOp.getArgs(),
                                                      afterBlock);
         }
 
@@ -56,12 +57,13 @@ struct IfOpFlattening : public OpRewritePattern<P4HIR::IfOp> {
         }
 
         rewriter.setInsertionPointToEnd(currentBlock);
-        rewriter.create<P4HIR::CondBrOp>(loc, ifOp.getCondition(), thenBeforeBody, elseBeforeBody);
+        auto i1Cond = rewriter.create<P4HIR::CastOp>(loc, rewriter.getI1Type(), ifOp.getCondition());
+        rewriter.create<cf::CondBranchOp>(loc, i1Cond, thenBeforeBody, elseBeforeBody);
 
         if (!emptyElse) {
             rewriter.setInsertionPointToEnd(elseAfterBody);
             if (auto elseYieldOp = dyn_cast<P4HIR::YieldOp>(elseAfterBody->getTerminator())) {
-                rewriter.replaceOpWithNewOp<P4HIR::BrOp>(elseYieldOp, elseYieldOp.getArgs(),
+                rewriter.replaceOpWithNewOp<cf::BranchOp>(elseYieldOp, elseYieldOp.getArgs(),
                                                          afterBlock);
             }
         }
@@ -99,12 +101,12 @@ class ScopeOpFlattening : public mlir::OpRewritePattern<P4HIR::ScopeOp> {
 
         // Save stack and then branch into the body of the region.
         rewriter.setInsertionPointToEnd(currentBlock);
-        rewriter.create<P4HIR::BrOp>(loc, mlir::ValueRange(), beforeBody);
+        rewriter.create<cf::BranchOp>(loc, mlir::ValueRange(), beforeBody);
 
         // Replace the scope return with a branch that jumps out of the body.
         rewriter.setInsertionPointToEnd(afterBody);
         if (auto yieldOp = dyn_cast<P4HIR::YieldOp>(afterBody->getTerminator())) {
-            rewriter.replaceOpWithNewOp<P4HIR::BrOp>(yieldOp, yieldOp.getArgs(), afterBlock);
+            rewriter.replaceOpWithNewOp<cf::BranchOp>(yieldOp, yieldOp.getArgs(), afterBlock);
         }
 
         // Replace the op with values return from the body region.
@@ -129,7 +131,7 @@ class TernaryOpFlattening : public mlir::OpRewritePattern<P4HIR::TernaryOp> {
         // when relevant.
         if (op->getNumResults()) locs.push_back(loc);
         auto *continueBlock = rewriter.createBlock(afterBlock, op->getResultTypes(), locs);
-        rewriter.create<P4HIR::BrOp>(loc, afterBlock);
+        rewriter.create<cf::BranchOp>(loc, afterBlock);
 
         auto &trueRegion = op.getTrueRegion();
         auto *trueBlock = &trueRegion.front();
@@ -137,7 +139,7 @@ class TernaryOpFlattening : public mlir::OpRewritePattern<P4HIR::TernaryOp> {
         rewriter.setInsertionPointToEnd(&trueRegion.back());
         auto trueYieldOp = mlir::cast<P4HIR::YieldOp>(trueTerminator);
 
-        rewriter.replaceOpWithNewOp<P4HIR::BrOp>(trueYieldOp, trueYieldOp.getArgs(), continueBlock);
+        rewriter.replaceOpWithNewOp<cf::BranchOp>(trueYieldOp, trueYieldOp.getArgs(), continueBlock);
         rewriter.inlineRegionBefore(trueRegion, continueBlock);
 
         auto *falseBlock = continueBlock;
@@ -147,12 +149,13 @@ class TernaryOpFlattening : public mlir::OpRewritePattern<P4HIR::TernaryOp> {
         mlir::Operation *falseTerminator = falseRegion.back().getTerminator();
         rewriter.setInsertionPointToEnd(&falseRegion.back());
         auto falseYieldOp = mlir::cast<P4HIR::YieldOp>(falseTerminator);
-        rewriter.replaceOpWithNewOp<P4HIR::BrOp>(falseYieldOp, falseYieldOp.getArgs(),
+        rewriter.replaceOpWithNewOp<cf::BranchOp>(falseYieldOp, falseYieldOp.getArgs(),
                                                  continueBlock);
         rewriter.inlineRegionBefore(falseRegion, continueBlock);
 
         rewriter.setInsertionPointToEnd(condBlock);
-        rewriter.create<P4HIR::CondBrOp>(loc, op.getCond(), trueBlock, falseBlock);
+        auto i1Cond = rewriter.create<P4HIR::CastOp>(loc, rewriter.getI1Type(), op.getCond());
+        rewriter.create<cf::CondBranchOp>(loc, i1Cond, trueBlock, falseBlock);
 
         rewriter.replaceOp(op, continueBlock->getArguments());
 

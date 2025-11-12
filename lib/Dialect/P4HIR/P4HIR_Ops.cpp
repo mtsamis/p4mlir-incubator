@@ -25,6 +25,7 @@
 #include "mlir/IR/Types.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/ValueRange.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Interfaces/FunctionImplementation.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Support/LLVM.h"
@@ -3611,33 +3612,6 @@ void P4HIR::ArrayGetOp::getAsmResultNames(function_ref<void(Value, StringRef)> s
 
 void P4HIR::ArrayElementRefOp::getAsmResultNames(function_ref<void(Value, StringRef)> setNameFn) {
     setNameFn(getResult(), "elt_ref");
-}
-
-//===----------------------------------------------------------------------===//
-// BrOp
-//===----------------------------------------------------------------------===//
-
-mlir::SuccessorOperands P4HIR::BrOp::getSuccessorOperands(unsigned index) {
-    assert(index == 0 && "invalid successor index");
-    return mlir::SuccessorOperands(getDestOperandsMutable());
-}
-
-Block *P4HIR::BrOp::getSuccessorForOperands(ArrayRef<Attribute>) { return getDest(); }
-
-//===----------------------------------------------------------------------===//
-// CondBrOp
-//===----------------------------------------------------------------------===//
-
-mlir::SuccessorOperands P4HIR::CondBrOp::getSuccessorOperands(unsigned index) {
-    assert(index < getNumSuccessors() && "invalid successor index");
-    return SuccessorOperands(index == 0 ? getDestOperandsTrueMutable()
-                                        : getDestOperandsFalseMutable());
-}
-
-Block *P4HIR::CondBrOp::getSuccessorForOperands(ArrayRef<Attribute> operands) {
-    if (IntegerAttr condAttr = dyn_cast_if_present<IntegerAttr>(operands.front()))
-        return condAttr.getValue().isOne() ? getDestTrue() : getDestFalse();
-    return nullptr;
 }
 
 //===----------------------------------------------------------------------===//

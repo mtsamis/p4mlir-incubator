@@ -22,10 +22,10 @@ module {
       %1 = p4hir.read %a : <!bit32>
       p4hir.yield %1 : !bit32
     } : !bit32
-    // CHECK: p4hir.br ^[[bb1:.*]]
+    // CHECK: cf.br ^[[bb1:.*]]
     // CHECK: ^[[bb1]]:
     // CHECK: %[[val:.*]] = p4hir.read
-    // CHECK: p4hir.br ^[[bb2:.*]](%[[val]] : !b32i)
+    // CHECK: cf.br ^[[bb2:.*]](%[[val]] : !b32i)
     // CHECK: ^[[bb2]](%0: !b32i):
     // CHECK: p4hir.return
     p4hir.return

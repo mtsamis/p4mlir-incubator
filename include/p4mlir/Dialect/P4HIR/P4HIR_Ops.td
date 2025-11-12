@@ -245,8 +245,8 @@ def CastOp : P4HIR_Op<"cast",
     ```
   }];
 
-  let arguments = (ins AnyP4Type:$src);
-  let results = (outs AnyP4Type:$result);
+  let arguments = (ins AnyType:$src);
+  let results = (outs AnyType:$result);
 
   let assemblyFormat = [{
     `(` $src `:` type($src) `)`
@@ -1986,81 +1986,6 @@ def ArrayElementRefOp : P4HIR_Op<"array_element_ref",
 
 include "p4mlir/Dialect/P4HIR/P4HIR_ParserOps.td"
 include "p4mlir/Dialect/P4HIR/P4HIR_ControlOps.td"
-
-def BrOp : P4HIR_Op<"br",
-    [DeclareOpInterfaceMethods<BranchOpInterface, ["getSuccessorForOperands"]>,
-     Pure, Terminator]> {
-  let summary = "Unconditional branch";
-  let description = [{
-    The `p4hir.br` branches unconditionally to a block.
-
-    Example:
-
-    ```mlir
-      ...
-        p4hir.br ^bb3
-      ^bb3:
-        p4hir.return
-    ```
-  }];
-
-  let builders = [
-    OpBuilder<(ins "mlir::Block *":$dest,
-              CArg<"mlir::ValueRange", "{}">:$destOperands), [{
-      $_state.addSuccessors(dest);
-      $_state.addOperands(destOperands);
-    }]>
-  ];
-
-  let arguments = (ins Variadic<AnyP4Type>:$destOperands);
-  let successors = (successor AnySuccessor:$dest);
-  let assemblyFormat = [{
-    $dest (`(` $destOperands^ `:` type($destOperands) `)`)? attr-dict
-  }];
-}
-
-def CondBrOp : P4HIR_Op<"cond_br",
-    [DeclareOpInterfaceMethods<BranchOpInterface, ["getSuccessorForOperands"]>,
-     Pure, Terminator, AttrSizedOperandSegments]> {
-  let summary = "Conditional branch";
-  let description = [{
-    The `p4hir.brcond %cond, ^bb0, ^bb1` branches to 'bb0' block in case
-    %cond (which must be a !p4hir.bool type) evaluates to true, otherwise
-    it branches to 'bb1'.
-
-    Example:
-
-    ```mlir
-      ...
-        p4hir.cond_br %a, ^bb3, ^bb4
-      ^bb3:
-        p4hir.return
-      ^bb4:
-        p4hir.yield
-    ```
-  }];
-
-  let builders = [
-    OpBuilder<(ins "mlir::Value":$cond, "mlir::Block *":$destTrue, "mlir::Block *":$destFalse,
-               CArg<"mlir::ValueRange", "{}">:$destOperandsTrue,
-               CArg<"mlir::ValueRange", "{}">:$destOperandsFalse), [{
-      build($_builder, $_state, cond, destOperandsTrue,
-            destOperandsFalse, destTrue, destFalse);
-    }]>
-  ];
-
-  let arguments = (ins BooleanType:$cond,
-                       Variadic<AnyP4Type>:$destOperandsTrue,
-                       Variadic<AnyP4Type>:$destOperandsFalse);
-  let successors = (successor AnySuccessor:$destTrue, AnySuccessor:$destFalse);
-  let assemblyFormat = [{
-    $cond
-    $destTrue (`(` $destOperandsTrue^ `:` type($destOperandsTrue) `)`)?
-    `,`
-    $destFalse (`(` $destOperandsFalse^ `:` type($destOperandsFalse) `)`)?
-    attr-dict
-  }];
-}
 
 def InlineAsmOp : P4HIR_Op<"asm", [RecursiveMemoryEffects]> {
   let description = [{
