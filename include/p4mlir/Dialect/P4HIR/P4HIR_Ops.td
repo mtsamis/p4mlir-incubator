@@ -1259,23 +1259,6 @@ def SliceOp : P4HIR_Op<"slice",
   let hasVerifier = 1;
 }
 
-def SliceRefOp : P4HIR_Op<"slice_ref",
-    [Pure,
-     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
-  let summary = "Extract a range or single bits from a referenced value";
-  let description = [{
-    It's used to select from a value with a constant low bit.
-
-  }];
-  let arguments = (ins Arg<BitsRefType, "the reference to load from", [MemRead]>:$input,
-                       I32Attr:$highBit, I32Attr:$lowBit);
-  let results = (outs BitsType:$result);
-  let assemblyFormat = [{
-    $input`[`$highBit `:` $lowBit`]` attr-dict `:` type($input) `->` type($result)
-  }];
-  let hasVerifier = 1;
-}
-
 def InstantiateOp : P4HIR_Op<"instantiate",
   [NoRegionArguments, CallOpInterface, Annotated,
    Symbol,

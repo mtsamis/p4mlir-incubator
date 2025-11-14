@@ -1723,17 +1723,17 @@ bool P4HIRConverter::preorder(const P4::IR::Slice *slice) {
     auto maybeRef = resolveReference(slice->e0, /* unchecked */ true);
     auto destType = getOrCreateType(slice->type);
 
-    mlir::Value sliceVal;
-    if (auto refType = mlir::dyn_cast<P4HIR::ReferenceType>(maybeRef.getType());
-        refType && mlir::isa<P4HIR::BitsType>(refType.getObjectType())) {
-        sliceVal = builder.create<P4HIR::SliceRefOp>(getLoc(builder, slice), destType, maybeRef,
-                                                     slice->getH(), slice->getL());
+    mlir::Value inputVal;
+    if (auto refType = mlir::dyn_cast<P4HIR::ReferenceType>(maybeRef.getType())) {
+        assert(mlir::isa<P4HIR::BitsType>(refType.getObjectType()) &&
+               "Unexpected reference type for slice");
+        inputVal = builder.create<P4HIR::ReadOp>(getLoc(builder, slice), maybeRef);
     } else {
-        sliceVal = builder.create<P4HIR::SliceOp>(getLoc(builder, slice), destType,
-                                                  getValue(slice->e0, getIntType(slice->e0->type)),
-                                                  slice->getH(), slice->getL());
+        inputVal = getValue(slice->e0, getIntType(slice->e0->type));
     }
 
+    auto sliceVal = builder.create<P4HIR::SliceOp>(getLoc(builder, slice), destType, inputVal,
+                                                   slice->getH(), slice->getL());
     setValue(slice, sliceVal);
     return false;
 }
@@ -2446,11 +2446,10 @@ bool P4HIRConverter::preorder(const P4::IR::MethodCallExpression *mce) {
 
                         if (dir == P4::IR::Direction::InOut) {
                             copyIn.setInit(true);
-                            b.create<P4HIR::AssignOp>(
-                                loc,
-                                b.create<P4HIR::SliceRefOp>(loc, sliceType, ref, slice->getH(),
-                                                            slice->getL()),
-                                copyIn);
+                            auto inputVal = b.create<P4HIR::ReadOp>(loc, ref);
+                            auto sliceVal = b.create<P4HIR::SliceOp>(loc, sliceType, inputVal,
+                                                                     slice->getH(), slice->getL());
+                            b.create<P4HIR::AssignOp>(loc, sliceVal, copyIn);
                         }
                         argVal = copyIn;
                     } else {
@@ -3006,13 +3005,12 @@ bool P4HIRConverter::preorder(const P4::IR::SelectExpression *select) {
     // Materialize values to select over. Select is always a ListExpression,
     // even if it contains a single value. Unpack the top-level select tuple
     // to its individual components for p4hir.transition_select.
-    const auto& comps = select->select->components;
+    const auto &comps = select->select->components;
     llvm::SmallVector<mlir::Value, 4> operands;
-    for (const P4::IR::Node *comp : comps)
-        operands.push_back(convert(comp));
+    for (const P4::IR::Node *comp : comps) operands.push_back(convert(comp));
 
-    auto transitionSelectOp = builder.create<P4HIR::ParserTransitionSelectOp>(
-        getLoc(builder, select), operands);
+    auto transitionSelectOp =
+        builder.create<P4HIR::ParserTransitionSelectOp>(getLoc(builder, select), operands);
     mlir::Block &first = transitionSelectOp.getBody().emplaceBlock();
 
     mlir::OpBuilder::InsertionGuard guard(builder);
