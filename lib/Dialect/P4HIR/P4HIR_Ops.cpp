@@ -4242,3 +4242,4 @@ void P4HIR::P4HIRDialect::initialize() {
 #include "p4mlir/Dialect/P4HIR/P4HIR_Dialect.cpp.inc"
 #include "p4mlir/Dialect/P4HIR/P4HIR_Ops.cpp.inc"  // NOLINT
 #include "p4mlir/Dialect/P4HIR/P4HIR_OpsEnums.cpp.inc"
+#include "p4mlir/Dialect/P4HIR/P4HIR_OpInterfaces.cpp.inc"

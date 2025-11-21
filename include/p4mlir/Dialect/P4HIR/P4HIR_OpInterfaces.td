@@ -87,5 +87,64 @@ def Annotated : OpInterface<"Annotated"> {
   let cppNamespace = "::P4::P4MLIR::P4HIR";
 }
 
+def ReadOpInterface : OpInterface<"ReadOpInterface"> {
+  let description = [{
+      Interface to query characteristics of read-like ops.
+  }];
+  let cppNamespace = "::P4::P4MLIR::P4HIR";
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/"Returns the reference-like operand to read from.",
+      /*retTy=*/"::mlir::Value",
+      /*methodName=*/"getMemRef",
+      /*args=*/(ins),
+      /*methodBody*/[{}],
+      /*defaultImplementation=*/ [{
+        return $_op.getRef();
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/"Returns the value read by this operation.",
+      /*retTy=*/"::mlir::Value",
+      /*methodName=*/"getValue",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return $_op;
+      }]
+    >,
+  ];
+}
+
+def WriteOpInterface : OpInterface<"WriteOpInterface"> {
+  let description = [{
+      Interface to query characteristics of write-like ops.
+  }];
+  let cppNamespace = "::P4::P4MLIR::P4HIR";
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/"Returns the reference-like operand to write to.",
+      /*retTy=*/"::mlir::Value",
+      /*methodName=*/"getMemRef",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return $_op.getRef();
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/"Returns the value to store.",
+      /*retTy=*/"::mlir::Value",
+      /*methodName=*/"getValue",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return $_op.getValue();
+      }]
+    >,
+  ];
+}
 
 #endif  // P4HIR_OPS_INTERFACES

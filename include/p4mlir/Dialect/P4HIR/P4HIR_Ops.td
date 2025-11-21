@@ -163,6 +163,7 @@ def ReadOp : P4HIR_Op<"read", [
                  "ref", "result",
                  "mlir::cast<P4HIR::ReferenceType>($_self).getObjectType()">,/*,
   DeclareOpInterfaceMethods<PromotableMemOpInterface>*/
+  DeclareOpInterfaceMethods<ReadOpInterface>,
   DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
 
   let summary = "Read value from variable";
@@ -195,7 +196,8 @@ def ReadOp : P4HIR_Op<"read", [
 def AssignOp : P4HIR_Op<"assign", [
   TypesMatchWith<"type of 'value' matches object type of 'addr'",
                  "ref", "value",
-                 "mlir::cast<ReferenceType>($_self).getObjectType()">,/*,
+                 "mlir::cast<ReferenceType>($_self).getObjectType()">,
+                 DeclareOpInterfaceMethods<WriteOpInterface>/*,
                  DeclareOpInterfaceMethods<PromotableMemOpInterface>*/]> {
 
   let summary = "Assign value to variable";
@@ -222,7 +224,9 @@ def AssignOp : P4HIR_Op<"assign", [
   // FIXME: add verifier.
 }
 
-def AssignSliceOp : P4HIR_Op<"assign_slice", []> {
+def AssignSliceOp : P4HIR_Op<"assign_slice", [
+  DeclareOpInterfaceMethods<WriteOpInterface>]> {
+
   let summary = "Assign a slice of values to variable";
   let description = [{
     ..
