@@ -3843,8 +3843,8 @@ LogicalResult P4HIR::ArrayGetOp::canonicalize(P4HIR::ArrayGetOp op, PatternRewri
         auto indexOp = op.getIndex().getDefiningOp();
         // We can only do this canonicalization if the index is defined before the read because
         // otherwise we would use index before it's defined.
-        if (indexOp && indexOp->getBlock() == readOp->getBlock() &&
-            indexOp->isBeforeInBlock(readOp)) {
+        if (indexOp && (indexOp->getBlock() != readOp->getBlock() ||
+            indexOp->isBeforeInBlock(readOp))) {
             auto ref = readOp.getRef();
             rewriter.setInsertionPoint(readOp);
             auto eltRef = rewriter.create<P4HIR::ArrayElementRefOp>(
