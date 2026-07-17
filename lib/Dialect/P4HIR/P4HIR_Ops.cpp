@@ -35,6 +35,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/InliningUtils.h"
+#include "p4mlir/Dialect/P4HIR/Matchers.h"
 #include "p4mlir/Dialect/P4HIR/P4HIR_Attrs.h"
 #include "p4mlir/Dialect/P4HIR/P4HIR_Dialect.h"
 #include "p4mlir/Dialect/P4HIR/P4HIR_OpsEnums.h"
