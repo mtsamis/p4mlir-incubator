@@ -37,7 +37,7 @@ struct RecursivePredicatedPatternMatcher {
 };
 
 template <typename OpType, typename... Matchers>
-auto m_OpWithPred(std::function<bool(OpType)> pred, Matchers... matchers) {
+inline auto m_OpWithPred(std::function<bool(OpType)> pred, Matchers... matchers) {
     return RecursivePredicatedPatternMatcher<OpType, Matchers...>(pred, matchers...);
 }
 
@@ -87,14 +87,14 @@ struct RecursivePredicatedIntegerCastPatternMatcher {
 };
 
 template <typename Matcher>
-auto m_IntegerCastOpWithPred(
+inline auto m_IntegerCastOpWithPred(
     std::function<bool(P4::P4MLIR::P4HIR::BitsType, P4::P4MLIR::P4HIR::BitsType)> pred,
     Matcher matcher, bool optional) {
     return RecursivePredicatedIntegerCastPatternMatcher<Matcher>(pred, matcher, optional);
 }
 
 template <typename Matcher>
-auto m_IntegerExt(Matcher matcher, bool isSigned, bool optional) {
+inline auto m_IntegerExt(Matcher matcher, bool isSigned, bool optional) {
     return m_IntegerCastOpWithPred(
         [isSigned](auto fromType, auto toType) {
             return fromType.isSigned() == isSigned && toType.isSigned() == isSigned &&
@@ -133,56 +133,57 @@ struct ConstantIntBinder {
 
 }  // namespace detail
 
-auto m_ConstantInt(unsigned *bindValue, bool matchBool = false) {
+inline auto m_ConstantInt(unsigned *bindValue, bool matchBool = false) {
     return detail::ConstantIntBinder(bindValue, matchBool);
 }
 
-auto m_ConstantInt(llvm::APSInt *bindValue, bool matchBool = false) {
+inline auto m_ConstantInt(llvm::APSInt *bindValue, bool matchBool = false) {
     return detail::ConstantIntBinder(bindValue, matchBool);
 }
 
-auto m_ConstantInt(bool matchBool = true) { return detail::ConstantIntBinder(matchBool); }
+inline auto m_ConstantInt(bool matchBool = true) { return detail::ConstantIntBinder(matchBool); }
 
 template <typename Matcher>
-auto m_UnaryOp(P4::P4MLIR::P4HIR::UnaryOpKind kind, Matcher matcher) {
+inline auto m_UnaryOp(P4::P4MLIR::P4HIR::UnaryOpKind kind, Matcher matcher) {
     return detail::m_OpWithPred<P4::P4MLIR::P4HIR::BinOp>(
         [kind](P4::P4MLIR::P4HIR::UnaryOp op) { return op.getKind() == kind; }, matcher);
 }
 
 template <typename LhsMatcher, typename RhsMatcher>
-auto m_BinaryOp(P4::P4MLIR::P4HIR::BinOpKind kind, LhsMatcher lhsMatcher, RhsMatcher rhsMatcher) {
+inline auto m_BinaryOp(P4::P4MLIR::P4HIR::BinOpKind kind, LhsMatcher lhsMatcher,
+                       RhsMatcher rhsMatcher) {
     return detail::m_OpWithPred<P4::P4MLIR::P4HIR::BinOp>(
         [kind](P4::P4MLIR::P4HIR::BinOp op) { return op.getKind() == kind; }, lhsMatcher,
         rhsMatcher);
 }
 
 template <typename LhsMatcher, typename RhsMatcher>
-auto m_ShlOp(LhsMatcher lhsMatcher, RhsMatcher rhsMatcher) {
+inline auto m_ShlOp(LhsMatcher lhsMatcher, RhsMatcher rhsMatcher) {
     return mlir::m_Op<P4::P4MLIR::P4HIR::ShlOp>(lhsMatcher, rhsMatcher);
 }
 
 template <typename LhsMatcher, typename RhsMatcher>
-auto m_ShrOp(LhsMatcher lhsMatcher, RhsMatcher rhsMatcher) {
+inline auto m_ShrOp(LhsMatcher lhsMatcher, RhsMatcher rhsMatcher) {
     return mlir::m_Op<P4::P4MLIR::P4HIR::ShrOp>(lhsMatcher, rhsMatcher);
 }
 
 template <typename Matcher>
-auto m_SignExt(Matcher matcher, bool optional = false) {
+inline auto m_SignExt(Matcher matcher, bool optional = false) {
     return detail::m_IntegerExt(matcher, true, optional);
 }
 
 template <typename Matcher>
-auto m_MaybeSignExt(Matcher matcher) {
+inline auto m_MaybeSignExt(Matcher matcher) {
     return m_SignExt(matcher, true);
 }
 
 template <typename Matcher>
-auto m_ZeroExt(Matcher matcher, bool optional = false) {
+inline auto m_ZeroExt(Matcher matcher, bool optional = false) {
     return detail::m_IntegerExt(matcher, false, optional);
 }
 
 template <typename Matcher>
-auto m_MaybeZeroExt(Matcher matcher) {
+inline auto m_MaybeZeroExt(Matcher matcher) {
     return m_ZeroExt(matcher, true);
 }
 
