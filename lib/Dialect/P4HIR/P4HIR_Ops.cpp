@@ -712,17 +712,13 @@ LogicalResult P4HIR::ConcatOp::verify() {
 }
 
 OpFoldResult P4HIR::ConcatOp::fold(FoldAdaptor adaptor) {
-    if (!adaptor.getLhs() || !adaptor.getRhs()) return {};
+    if (adaptor.getLhs() && adaptor.getRhs()) {
+        auto lhs = P4HIR::getConstantInt(adaptor.getLhs()).value();
+        auto rhs = P4HIR::getConstantInt(adaptor.getRhs()).value();
+        return P4HIR::IntAttr::get(getType(), lhs.concat(rhs));
+    }
 
-    auto lhsVal = P4HIR::getConstantInt(adaptor.getLhs()).value();
-    auto rhsVal = P4HIR::getConstantInt(adaptor.getRhs()).value();
-    auto resultType = cast<P4HIR::BitsType>(getType());
-    unsigned resultWidth = resultType.getWidth();
-    unsigned rhsWidth = cast<P4HIR::BitsType>(getRhs().getType()).getWidth();
-
-    auto result = (lhsVal.zextOrTrunc(resultWidth) << rhsWidth) | rhsVal.zextOrTrunc(resultWidth);
-
-    return P4HIR::IntAttr::get(getContext(), resultType, result);
+    return {};
 }
 
 LogicalResult P4HIR::ConcatOp::canonicalize(P4HIR::ConcatOp op, PatternRewriter &rewriter) {
