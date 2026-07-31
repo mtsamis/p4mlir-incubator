@@ -1261,6 +1261,7 @@ def TupleExtractOp : P4HIR_Op<"tuple_extract",
   // let assemblyFormat = [{
   //   $input `[` $fieldIndex `]` attr-dict `:` type($result)
   // }];
+  let hasFolder = 1;
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
 }
