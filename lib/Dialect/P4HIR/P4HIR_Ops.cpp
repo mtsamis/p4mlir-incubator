@@ -1334,8 +1334,8 @@ struct InvertIfCondition : public OpRewritePattern<P4HIR::IfOp> {
         Block *thenBlock = ifOp.thenBlock(), *elseBlock = ifOp.elseBlock();
         if (!thenBlock || !elseBlock) return failure();
 
-        auto condStmt = ifOp.getCondition().getDefiningOp<P4HIR::UnaryOp>();
-        if (!condStmt || condStmt.getKind() != P4HIR::UnaryOpKind::LNot) return failure();
+        auto condStmt = getDefiningUnop(P4HIR::UnaryOpKind::LNot, ifOp.getCondition());
+        if (!condStmt) return failure();
 
         // Swap basic blocks
         auto &thenRegion = ifOp.getThenRegion();

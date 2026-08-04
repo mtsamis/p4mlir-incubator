@@ -104,30 +104,69 @@ inline auto m_IntegerExt(Matcher matcher, bool isSigned, bool optional) {
 }
 
 struct ConstantIntBinder {
-    llvm::APSInt *bindValue;
-    unsigned *bindValueInt;
+    enum Kind : unsigned {
+        KindMatchOnly = 0,
+        KindBindAPSInt = 1,
+        KindBindInt = 2,
+        KindMatchAPSint = 3,
+        KindMatchInt = 4,
+    };
+
+    llvm::APSInt *bindValue = nullptr;
+    llvm::APSInt matchValue;
+    unsigned *bindValueInt = nullptr;
+    unsigned matchValueInt = 0;
+    unsigned kind;
     bool matchBool;
 
     ConstantIntBinder(bool matchBool)
-        : bindValue(nullptr), bindValueInt(nullptr), matchBool(matchBool) {}
+        : bindValue(nullptr), bindValueInt(nullptr), kind(KindMatchOnly), matchBool(matchBool) {}
 
     ConstantIntBinder(llvm::APSInt *bindValue, bool matchBool)
-        : bindValue(bindValue), bindValueInt(nullptr), matchBool(matchBool) {}
+        : bindValue(bindValue), kind(KindBindAPSInt), matchBool(matchBool) {}
 
     ConstantIntBinder(unsigned *bindValueInt, bool matchBool)
-        : bindValue(nullptr), bindValueInt(bindValueInt), matchBool(matchBool) {}
+        : bindValueInt(bindValueInt), kind(KindBindInt), matchBool(matchBool) {}
+
+    ConstantIntBinder(llvm::APSInt matchValue, bool matchBool)
+        : matchValue(matchValue), kind(KindMatchAPSint), matchBool(matchBool) {}
+
+    ConstantIntBinder(unsigned matchValueInt, bool matchBool)
+        : matchValueInt(matchValueInt), kind(KindMatchInt), matchBool(matchBool) {}
 
     bool match(mlir::Operation *op) {
         mlir::Attribute attr;
         if (!matchPattern(op, m_Constant(&attr))) return false;
         auto val = P4::P4MLIR::P4HIR::getConstantInt(attr);
         if (!val || (mlir::isa<P4::P4MLIR::P4HIR::BoolAttr>(attr) && !matchBool)) return false;
-        if (bindValue) *bindValue = *val;
-        if (bindValueInt) {
-            if (!val->isIntN(32)) return false;
-            *bindValueInt = val->getLimitedValue();
+
+        switch (kind) {
+            case KindMatchOnly: {
+                return true;
+            }
+            case KindBindAPSInt: {
+                assert(bindValue && "Expected valid pointer");
+                *bindValue = *val;
+                return true;
+            }
+            case KindBindInt: {
+                assert(bindValueInt && "Expected valid pointer");
+                if (!val->isIntN(32)) return false;
+                *bindValueInt = val->getLimitedValue();
+                return true;
+            }
+            case KindMatchAPSint: {
+                return val == matchValue;
+            }
+            case KindMatchInt: {
+                if (!val->isIntN(32)) return false;
+                return val->getLimitedValue() == matchValueInt;
+            }
+            default: {
+                llvm_unreachable("Impossible kind");
+                return false;
+            }
         }
-        return true;
     }
 };
 
@@ -142,6 +181,16 @@ inline auto m_ConstantInt(llvm::APSInt *bindValue, bool matchBool = false) {
 }
 
 inline auto m_ConstantInt(bool matchBool = true) { return detail::ConstantIntBinder(matchBool); }
+
+inline auto m_ConstantInt(unsigned matchValue, bool matchBool = false) {
+    return detail::ConstantIntBinder(matchValue, matchBool);
+}
+
+inline auto m_ConstantInt(llvm::APSInt matchValue, bool matchBool = false) {
+    return detail::ConstantIntBinder(matchValue, matchBool);
+}
+
+inline auto m_ZeroInt(bool matchBool = false) { return m_ConstantInt((unsigned)0, matchBool); }
 
 template <typename Matcher>
 inline auto m_UnaryOp(P4::P4MLIR::P4HIR::UnaryOpKind kind, Matcher matcher) {
