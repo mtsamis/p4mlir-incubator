@@ -4,6 +4,7 @@
 
 #include "llvm/ADT/TypeSwitch.h"
 #include "mlir/Interfaces/MemorySlotInterfaces.h"
+#include "p4mlir/Dialect/P4HIR/Matchers.h"
 #include "p4mlir/Dialect/P4HIR/P4HIR_Attrs.h"
 #include "p4mlir/Dialect/P4HIR/P4HIR_Dialect.h"
 #include "p4mlir/Dialect/P4HIR/P4HIR_Ops.h"
@@ -307,12 +308,10 @@ bool P4HIR::ArrayElementRefOp::canRewire(const DestructurableMemorySlot &slot,
     if (slot.ptr != getInput()) return false;
 
     // Can only rewire constant indices
-    auto cstIndex = getIndex().getDefiningOp<P4HIR::ConstOp>();
-    if (!cstIndex) return false;
+    unsigned cstIndex;
+    if (!matchPattern(getIndex(), m_ConstantInt(&cstIndex))) return false;
 
-    auto indexAttr = IntegerAttr::get(IndexType::get(getContext()),
-                                      cstIndex.getValueAs<P4HIR::IntAttr>().getUInt());
-
+    auto indexAttr = IntegerAttr::get(IndexType::get(getContext()), cstIndex);
     if (!slot.subelementTypes.contains(indexAttr)) return false;
 
     usedIndices.insert(indexAttr);
@@ -324,10 +323,11 @@ bool P4HIR::ArrayElementRefOp::canRewire(const DestructurableMemorySlot &slot,
 DeletionKind P4HIR::ArrayElementRefOp::rewire(const DestructurableMemorySlot &slot,
                                               DenseMap<Attribute, MemorySlot> &subslots,
                                               OpBuilder &builder, const DataLayout &dataLayout) {
-    auto cstIndex = cast<P4HIR::ConstOp>(getIndex().getDefiningOp());
-    auto indexAttr = IntegerAttr::get(IndexType::get(getContext()),
-                                      cstIndex.getValueAs<P4HIR::IntAttr>().getUInt());
+    unsigned cstIndex;
+    [[maybe_unused]] bool match = matchPattern(getIndex(), m_ConstantInt(&cstIndex));
+    assert(match && "expected constant index");
 
+    auto indexAttr = IntegerAttr::get(IndexType::get(getContext()), cstIndex);
     auto it = subslots.find(indexAttr);
     assert(it != subslots.end());
 
