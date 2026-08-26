@@ -123,6 +123,16 @@ def FlattenCFG : Pass<"p4hir-flatten-cfg"> {
 }
 
 //===----------------------------------------------------------------------===//
+// FlattenHeaderStructs
+//===----------------------------------------------------------------------===//
+
+def FlattenHeaderStructs : Pass<"p4hir-flatten-header-structs", "mlir::ModuleOp"> {
+  let summary = "Flatten structs within headers";
+  let constructor = "P4MLIR::createFlattenHeaderStructsPass()";
+  let dependentDialects = ["P4MLIR::P4HIR::P4HIRDialect"];
+}
+
+//===----------------------------------------------------------------------===//
 // SerEnumElimination
 //===----------------------------------------------------------------------===//
 
