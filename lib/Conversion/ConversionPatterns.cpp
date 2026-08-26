@@ -142,8 +142,8 @@ P4HIRTypeConverter::P4HIRTypeConverter() {
     });
 }
 
-static FailureOr<mlir::Attribute> convertAttribute(mlir::Attribute attr,
-                                                   const TypeConverter *typeConverter) {
+FailureOr<mlir::Attribute> P4::P4MLIR::convertAttribute(mlir::Attribute attr,
+                                                        const TypeConverter *typeConverter) {
     return llvm::TypeSwitch<mlir::Attribute, FailureOr<mlir::Attribute>>(attr)
         .Case<mlir::TypeAttr>([&](auto typeAttr) -> FailureOr<mlir::Attribute> {
             auto newType = typeConverter->convertType(typeAttr.getValue());
@@ -209,18 +209,72 @@ FailureOr<Operation *> P4::P4MLIR::doTypeConversion(Operation *op, ValueRange op
 
     // Move the regions over, converting the signatures as we go.
     rewriter.startOpModification(newOp);
-    for (size_t i = 0, e = op->getNumRegions(); i < e; ++i) {
-        Region &region = op->getRegion(i);
-        Region *newRegion = &newOp->getRegion(i);
-
+    for (auto [region, newRegion] : llvm::zip_equal(op->getRegions(), newOp->getRegions())) {
         // Move the region and convert the region args.
-        rewriter.inlineRegionBefore(region, *newRegion, newRegion->begin());
-        TypeConverter::SignatureConversion result(newRegion->getNumArguments());
-        if (failed(typeConverter->convertSignatureArgs(newRegion->getArguments(), result)))
+        rewriter.inlineRegionBefore(region, newRegion, newRegion.begin());
+        TypeConverter::SignatureConversion result(newRegion.getNumArguments());
+        if (failed(typeConverter->convertSignatureArgs(newRegion.getArguments(), result)))
             return rewriter.notifyMatchFailure(op->getLoc(),
                                                "op region signature arg conversion failed");
-        if (failed(rewriter.convertRegionTypes(newRegion, *typeConverter, &result)))
+        if (failed(rewriter.convertRegionTypes(&newRegion, *typeConverter, &result)))
             return rewriter.notifyMatchFailure(op->getLoc(), "op region types conversion failed");
+    }
+    rewriter.finalizeOpModification(newOp);
+
+    rewriter.replaceOp(op, newOp->getResults());
+    return newOp;
+}
+
+mlir::FailureOr<mlir::Operation *> P4::P4MLIR::doPlainTypeConversion(
+    mlir::Operation *op, mlir::ValueRange operands, const mlir::TypeConverter *converter,
+    mlir::RewriterBase &rewriter) {
+    // Convert the attributes.
+    llvm::SmallVector<mlir::NamedAttribute, 4> newAttrs;
+    newAttrs.reserve(op->getAttrs().size());
+    for (auto attr : op->getAttrs()) {
+        auto maybeNewAttr = convertAttribute(attr.getValue(), converter);
+        if (failed(maybeNewAttr))
+            return rewriter.notifyMatchFailure(
+                op->getLoc(), "failed to convert attribute '" + attr.getName().getValue() + "'");
+        newAttrs.emplace_back(attr.getName(), maybeNewAttr.value());
+    }
+
+    // Convert the result types, but make sure the mapping is 1-1.
+    llvm::SmallVector<mlir::Type> newResults;
+    for (mlir::Value res : op->getResults()) {
+        mlir::Type newType = converter->convertType(res.getType());
+        if (!newType)
+            return rewriter.notifyMatchFailure(op->getLoc(), "op result type conversion failed");
+
+        newResults.push_back(newType);
+    }
+
+    // Build the state for the edited clone.
+    mlir::OperationState state(op->getLoc(), op->getName().getStringRef(), operands, newResults,
+                               newAttrs, op->getSuccessors());
+    for (size_t i = 0, e = op->getNumRegions(); i < e; ++i) state.addRegion();
+
+    // Must create the op before running any modifications on the regions so that
+    // we don't crash with '-debug' and so we have something to 'root update'.
+    mlir::Operation *newOp = rewriter.create(state);
+
+    // Move the regions over, converting the signatures as we go.
+    rewriter.startOpModification(newOp);
+    for (auto [region, newRegion] : llvm::zip_equal(op->getRegions(), newOp->getRegions())) {
+        for (mlir::Block &block : llvm::make_early_inc_range(region)) {
+            mlir::Block &newBlock = newRegion.emplaceBlock();
+            llvm::SmallVector<mlir::Value> newArgs;
+            for (mlir::Value arg : block.getArguments()) {
+                mlir::Type newArgType = converter->convertType(arg.getType());
+                if (!newArgType)
+                    return rewriter.notifyMatchFailure(op->getLoc(),
+                                                       "block argument type conversion failed");
+                mlir::Value newArg = newBlock.addArgument(newArgType, arg.getLoc());
+                newArgs.push_back(newArg);
+            }
+
+            rewriter.inlineBlockBefore(&block, &newBlock, newBlock.end(), newArgs);
+        }
     }
     rewriter.finalizeOpModification(newOp);
 

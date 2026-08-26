@@ -18,10 +18,22 @@ class P4HIRTypeConverter : public mlir::TypeConverter {
     P4HIRTypeConverter();
 };
 
+// Performs type conversion on the given attribute.
+llvm::FailureOr<mlir::Attribute> convertAttribute(mlir::Attribute attr,
+                                                  const mlir::TypeConverter *typeConverter);
+
 // Performs type conversion on the given operation.
 llvm::FailureOr<mlir::Operation *> doTypeConversion(mlir::Operation *op, mlir::ValueRange operands,
                                                     mlir::ConversionPatternRewriter &rewriter,
                                                     const mlir::TypeConverter *typeConverter);
+
+/// Replace `op` with a clone that has updated types and attributes based on `converter`.
+/// This is a version of `doTypeConversion` that can be used without a dialect-conversion pattern
+/// rewriter.
+mlir::FailureOr<mlir::Operation *> doPlainTypeConversion(mlir::Operation *op,
+                                                         mlir::ValueRange operands,
+                                                         const mlir::TypeConverter *converter,
+                                                         mlir::RewriterBase &rewriter);
 
 /// Generic pattern which replaces an operation by one of the same operation
 /// name, but with converted attributes, operands, and result types to eliminate
