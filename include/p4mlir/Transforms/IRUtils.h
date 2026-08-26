@@ -18,6 +18,9 @@
 
 namespace P4::P4MLIR::IRUtils {
 
+/// Make `val` accessible to `op` regardless of wherher `op` is inside an action.
+mlir::Value getAccessibleValue(mlir::RewriterBase &rewriter, mlir::Operation *op, mlir::Value val);
+
 // Inline `scopeOp`'s body to its parent.
 void inlineScope(mlir::RewriterBase &rewriter, P4HIR::ScopeOp scopeOp);
 
@@ -233,6 +236,193 @@ class PathWalker {
     const IndirectUsesMap *indirectUses = nullptr;
     NodeCallbackFn nodeCb;
     LeafCallbackFn leafCb;
+};
+
+class IndexableValueRewriter {
+    /// A helper class to replace indexable-typed values with new values that may have entirely
+    /// different layouts, using P4HIR::FieldPath. Users of an indexable-typed value may be
+    /// field-access operations, which produce new FieldPaths based on their operands, or leaf
+    /// operations which consume values. A successful transformation using this class should make
+    /// the original value transitively dead: it may only have other field-access operations as
+    /// users, which themselves are transitively dead.
+    /// The root value may either be a reference or a value of an indexable-type and the values to
+    /// replace are references or values accordingly.
+
+    IndexableValueRewriter(mlir::RewriterBase &rewriter, mlir::Value root, mlir::Type type,
+                           mlir::Value newRoot, mlir::Type newType)
+        : rewriter(rewriter), root(root), newRoot(newRoot), indirectUses(nullptr) {
+        isRef = mlir::isa<P4HIR::ReferenceType>(type);
+        rootType = P4HIR::maybeUnref(type);
+        assert(mlir::isa<P4HIR::IndexableTypeInterface>(rootType) &&
+               "Expected indexable root types");
+
+        if (newType) {
+            assert((mlir::isa<P4HIR::ReferenceType>(newType) == isRef) &&
+                   "Expected both refs or values");
+            newRootType = P4HIR::maybeUnref(newType);
+        }
+    }
+
+ public:
+    using IndirectUsesMap = llvm::DenseMap<mlir::Value, llvm::SmallVector<mlir::Value>>;
+
+    /// Minimal constructor.
+    IndexableValueRewriter(mlir::RewriterBase &rewriter, mlir::Value rootValue)
+        : IndexableValueRewriter(rewriter, rootValue, rootValue.getType(), mlir::Value(),
+                                 mlir::Type()) {}
+
+    /// Constructor friendly for operation result replacement.
+    IndexableValueRewriter(mlir::RewriterBase &rewriter, mlir::Value rootValue,
+                           mlir::Value newRootValue)
+        : IndexableValueRewriter(rewriter, rootValue, rootValue.getType(), newRootValue,
+                                 newRootValue.getType()) {}
+
+    /// Constructor friendly for operation argument replacement.
+    IndexableValueRewriter(mlir::RewriterBase &rewriter, mlir::Value rootValue,
+                           mlir::Type origRootType)
+        : IndexableValueRewriter(rewriter, rootValue, origRootType, rootValue,
+                                 rootValue.getType()) {}
+
+    IndexableValueRewriter(IndexableValueRewriter &&) = delete;
+    IndexableValueRewriter &operator=(IndexableValueRewriter &&) = delete;
+    IndexableValueRewriter(const IndexableValueRewriter &) = delete;
+    IndexableValueRewriter &operator=(const IndexableValueRewriter &) = delete;
+    virtual ~IndexableValueRewriter() {}
+
+    IndexableValueRewriter &setIndirectUsesMap(const IndirectUsesMap *indirectUsesMap) {
+        indirectUses = indirectUsesMap;
+        return *this;
+    }
+
+    /// This function must build the necessary operation to access the field that corresponds to
+    /// `field` from `value`, using `loc` as the location of access.
+    virtual mlir::Value getFromField(mlir::Location loc, mlir::Value val,
+                                     P4HIR::IndexedField field) {
+        // Default implementation to handle P4HIR operations. Users should override this to also
+        // support operations from other dialects.
+        bool isRef = mlir::isa<P4HIR::ReferenceType>(val.getType());
+        if (mlir::isa<P4HIR::StructLikeTypeInterface>(field.getParentType())) {
+            if (isRef)
+                return P4HIR::StructFieldRefOp::create(rewriter, loc, val, field.getIndex());
+            else
+                return P4HIR::StructExtractOp::create(rewriter, loc, val, field.getIndex());
+        } else if (mlir::isa<P4HIR::ArrayType>(field.getParentType())) {
+            auto idxType = P4HIR::BitsType::get(rewriter.getContext(), 32, false);
+            auto idx = P4HIR::ConstOp::create(rewriter, loc,
+                                              P4HIR::IntAttr::get(idxType, field.getIndex()));
+            if (isRef)
+                return P4HIR::ArrayElementRefOp::create(rewriter, loc, val, idx);
+            else
+                return P4HIR::ArrayGetOp::create(rewriter, loc, val, idx);
+        } else {
+            llvm_unreachable("Unexpected type");
+            return mlir::Value();
+        }
+    }
+
+    /// This function builds the necessary operations to access the field that corresponds to
+    /// `path` from `value`, using `loc` as the location of access.
+    mlir::Value getFromPath(mlir::Location loc, mlir::Value val, P4HIR::FieldPath path) {
+        for (auto field : path.iterFields()) val = getFromField(loc, val, field);
+        return val;
+    }
+
+    /// `op` is an operation that has some operands accessing root value's fields. If it is possible
+    /// to make `op` not use these operands then this should be done and then mlir::success() must
+    /// be returned. Otherwise mlir::failure() must be returned. These operands and their paths can
+    /// be found by using `getPath` on `op`'s arguments.
+    virtual mlir::LogicalResult replaceUsesIn(mlir::Operation *op) = 0;
+
+    /// `value` is a value used to access the root value's field that corresponds `path`. If it is
+    /// possible to replace `value` with a new equivalent that doesn't depend on the root value,
+    /// then this new value should be returned. Otherwise mlir::Value() should be returned.
+    virtual mlir::Value getReplacement(mlir::Value value, P4HIR::FieldPath path) {
+        return mlir::Value();
+    }
+
+    /// If `value` is accessing a field of the root value then return the corresponding field path,
+    /// otherwise return the empty path.
+    P4HIR::FieldPath getPath(mlir::Value value) {
+        auto it = valueToPath.find(value);
+        return it != valueToPath.end() ? it->second : P4HIR::FieldPath();
+    }
+
+    // Assuming that `op` can only have a single operand with a corresponding field path, return
+    // that operand and path.
+    std::pair<mlir::OpOperand *, P4HIR::FieldPath> getOperandWithPath(mlir::Operation *op) {
+        P4HIR::FieldPath resPath;
+        mlir::OpOperand *resOperand = nullptr;
+        for (mlir::OpOperand &operand : op->getOpOperands()) {
+            if (auto path = getPath(operand.get()); !path.isEmpty()) {
+                assert(!resOperand && "Unexpected operation with multiple used paths");
+                resPath = path;
+                resOperand = &operand;
+            }
+        }
+        assert(resOperand && "A path must exist for leaf operations");
+        return {resOperand, resPath};
+    }
+
+    /// Make `root` transitively unused by transitively replacing or making users dead.
+    mlir::LogicalResult replace() {
+        /// Use a vector and deduplicate with a set so we get deterministic order.
+        llvm::SmallVector<mlir::Operation *> leafOps;
+        mlir::DenseSet<mlir::Operation *> seenLeafOps;
+
+        PathWalker()
+            .setIndirectUsesMap(indirectUses)
+            .setNodeCallback([&](mlir::Value value, P4HIR::FieldPath path) {
+                if (mlir::Operation *def = value.getDefiningOp()) rewriter.setInsertionPoint(def);
+                mlir::Value valReplacement = getReplacement(value, path);
+
+                if (valReplacement) {
+                    // Stop early: replace `value` with a new one that doesn't depend on the root.
+                    rewriter.replaceAllUsesWith(value, valReplacement);
+                    return mlir::WalkResult::skip();
+                }
+
+                valueToPath.insert({value, path});
+                return mlir::WalkResult::advance();
+            })
+            .setLeafCallback(
+                [&](mlir::Operation *user, mlir::OpOperand &operand, P4HIR::FieldPath path) {
+                    // It is reasonable to expect that leaf operations may have multiple uses of
+                    // root fields, so we don't directly ask for their replacement. Store `user` and
+                    // process once we have discovered all leaf paths.
+                    if (seenLeafOps.insert(user).second) leafOps.push_back(user);
+                    return mlir::WalkResult::advance();
+                })
+            .walk(root, rootType);
+
+        for (mlir::Operation *op : leafOps) {
+            rewriter.setInsertionPoint(op);
+            if (failed(replaceUsesIn(op))) return mlir::failure();
+        }
+
+        return mlir::success();
+    }
+
+ protected:
+    mlir::RewriterBase &rewriter;
+
+    /// The value whose uses are being replaced.
+    mlir::Value root;
+    /// The plain (without p4hir.ref) original type of `root`.
+    /// Note that it may differ from `root.getType()` (e.g. when doing dialect ceonversion).
+    mlir::Type rootType;
+    /// Optional helper: A new root value to use while doing the replacement or `root`.
+    mlir::Value newRoot;
+    /// Optional helper: A plain (without p4hir.ref) new root type for `value` after replacement.
+    mlir::Type newRootType;
+    /// True if doing reference replacement, false if doing value replacement.
+    bool isRef;
+
+    /// Maintains a mapping from values that are used in leaf operations to field paths.
+    llvm::DenseMap<mlir::Value, P4HIR::FieldPath> valueToPath;
+
+    /// Optional mapping of indirect value uses. An indirect use is when a value is accessed in a
+    /// way other than normal SSA def-use chains (e.g. through symbols).
+    const IndirectUsesMap *indirectUses = nullptr;
 };
 
 }  // namespace P4::P4MLIR::IRUtils
