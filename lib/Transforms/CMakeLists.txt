@@ -4,6 +4,7 @@
 
 add_mlir_dialect_library(P4MLIRTransforms
   EnumElimination.cpp
+  FlattenHeaderStructs.cpp
   FlattenCFG.cpp
   IRUtils.cpp
   InlineParserControl.cpp
