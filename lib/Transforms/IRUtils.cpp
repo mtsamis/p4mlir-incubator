@@ -192,7 +192,7 @@ P4HIR::ParserStateOp IRUtils::createSubState(mlir::RewriterBase &rewriter,
     rewriter.createBlock(&newState.getBody(), newState.getBody().begin());
 
     return newState;
-};
+}
 
 mlir::LogicalResult IRUtils::SplitStateRewriter::init() {
     assert(step == CREATED || step == CANCELED);

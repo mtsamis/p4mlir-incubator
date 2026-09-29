@@ -220,7 +220,7 @@ class PathWalker {
  protected:
     // Value can only be `root` or otherwise a result of a field access operation.
     mlir::WalkResult walkImpl(mlir::Value value, P4HIR::FieldPath path) {
-        auto status = nodeCb(value, path);
+        auto status = nodeCb ? nodeCb(value, path) : mlir::WalkResult::advance();
         if (status.wasSkipped()) return mlir::WalkResult::advance();
         if (status.wasInterrupted()) return mlir::WalkResult::interrupt();
 
@@ -232,7 +232,8 @@ class PathWalker {
                 if (walkImpl(resValue, resPath).wasInterrupted())
                     return mlir::WalkResult::interrupt();
             } else {
-                if (leafCb(user, use, path).wasInterrupted()) return mlir::WalkResult::interrupt();
+                auto status = leafCb ? leafCb(user, use, path) : mlir::WalkResult::advance();
+                if (status.wasInterrupted()) return mlir::WalkResult::interrupt();
             }
         }
 
@@ -262,6 +263,9 @@ class PathWalker {
 /// The root value may either be a reference or a value of an indexable-type and the values to
 /// replace are references or values accordingly.
 class PathRewriter {
+ public:
+    using IndirectUsesMap = llvm::DenseMap<mlir::Value, llvm::SmallVector<mlir::Value>>;
+
     PathRewriter(mlir::RewriterBase &rewriter, mlir::Value root, mlir::Type type,
                  mlir::Value newRoot, mlir::Type newType)
         : rewriter(rewriter), root(root), newRoot(newRoot) {
@@ -270,15 +274,8 @@ class PathRewriter {
         assert(mlir::isa<P4HIR::IndexableTypeInterface>(rootType) &&
                "Expected indexable root types");
 
-        if (newType) {
-            assert((mlir::isa<P4HIR::ReferenceType>(newType) == isRef) &&
-                   "Expected both refs or values");
-            newRootType = P4HIR::maybeUnref(newType);
-        }
+        if (newType) newRootType = P4HIR::maybeUnref(newType);
     }
-
- public:
-    using IndirectUsesMap = llvm::DenseMap<mlir::Value, llvm::SmallVector<mlir::Value>>;
 
     /// Minimal constructor.
     PathRewriter(mlir::RewriterBase &rewriter, mlir::Value rootValue)
