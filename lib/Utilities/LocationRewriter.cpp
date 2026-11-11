@@ -7,7 +7,7 @@
 #include "p4mlir/Utilities/IRUtils.h"
 
 using namespace P4::P4MLIR;
-
+#if 0
 std::optional<IRUtils::LocationMapping::SplitFieldLocation> IRUtils::LocationMapping::remap(
     FieldLocation from) const {
     assert((from.first < fromCount()) && "'from' index out of bounds");
@@ -86,3 +86,4 @@ bool IRUtils::LocationMapping::isUniqueImpl(unsigned index, P4HIR::FieldPath pat
 
     return true;
 }
+#endif

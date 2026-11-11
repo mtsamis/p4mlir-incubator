@@ -38,7 +38,7 @@ struct MakeHeadersToplevelPass
 
 }  // end namespace
 
-using FieldLocation = IRUtils::LocationMapping::FieldLocation;
+using FieldLocation = IRUtils::LocationMapping2::Location;
 
 enum CollectionsIndices : unsigned {
     C_HEADERS = 0,
@@ -46,6 +46,113 @@ enum CollectionsIndices : unsigned {
     C_COUNT = 2,
 };
 
+mlir::LogicalResult makeHeadersToplevel2(mlir::FunctionOpInterface object,
+                                         mlir::BlockArgument hdrsArg, mlir::BlockArgument metaArg) {
+    auto *ctx = object.getContext();
+
+    if (!mlir::isa<P4HIR::ReferenceType>(hdrsArg.getType()))
+        return mlir::emitError(hdrsArg.getLoc(), "Expected reference-typed headers argument");
+
+    if (!mlir::isa<P4HIR::ReferenceType>(metaArg.getType()))
+        return mlir::emitError(metaArg.getLoc(), "Expected reference-typed metadata argument");
+
+    auto hdrsType = P4HIR::unref<P4HIR::StructType>(hdrsArg.getType());
+    auto metaType = P4HIR::unref<P4HIR::StructType>(metaArg.getType());
+
+    IRUtils::LocationMapping2 mapping;
+    auto &hdrsSource = mapping.createSource(hdrsType);
+    auto &metaSource = mapping.createSource(metaType);
+    auto &newHdrsTarget = mapping.createTarget();
+    auto &newMetaTarget = mapping.createTarget();
+
+    // Mark all header types.
+    P4HIR::FieldPath::forEachFieldPath(hdrsType, [&](P4HIR::FieldPath path) {
+        if (mlir::isa<P4HIR::HeaderType, P4HIR::HeaderUnionType, P4HIR::HeaderStackType>(
+                path.getType())) {
+            hdrsSource.addMapping(path, newHdrsTarget.loc());
+            return mlir::WalkResult::skip();
+        }
+
+        return mlir::WalkResult::advance();
+    });
+
+    // Collect sorted header paths.
+    auto hdrPaths = hdrsSource.getMappedPaths();
+
+    // Collect sorted metadata paths.
+    auto hdrsMetaPaths = hdrsSource.getUnmappedPaths();
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "Header paths:\n";
+        for (auto path : hdrPaths) llvm::dbgs() << "  " << path << "\n";
+
+        llvm::dbgs() << "Header Metadata paths:\n";
+        for (auto path : hdrsMetaPaths) llvm::dbgs() << "  " << path << "\n";
+    });
+
+    // Build new, seperated and flattened types for headers and metadata.
+    auto newHdrsType = IRUtils::createStructType(ctx, hdrsType.getName(), hdrPaths);
+
+    auto newMetaType = metaType;
+    if (!hdrsMetaPaths.empty()) {
+        auto newHdrsMetaType =
+            IRUtils::createStructType(ctx, hdrsType.getName() + "_Metadata", hdrsMetaPaths);
+        auto hdrsMetaFieldName = mlir::StringAttr::get(ctx, "hdr_metadata$");
+
+        auto newMetaFields = llvm::to_vector(metaType.getElements());
+        newMetaFields.emplace_back(hdrsMetaFieldName, newHdrsMetaType);
+        newMetaType = P4HIR::StructType::get(ctx, metaType.getName(), newMetaFields);
+    }
+
+    newHdrsTarget.setRootType(newHdrsType);
+    newMetaTarget.setRootType(newMetaType);
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "New headers type: " << newHdrsType << "\n";
+        llvm::dbgs() << "New metadata type: " << newMetaType << "\n";
+    });
+
+    // Map original header paths to the new flattened ones.
+    auto newHdrPaths = llvm::to_vector(P4HIR::FieldPath(newHdrsType).children());
+    hdrsSource.addMappings(hdrPaths, newHdrsTarget.locs(newHdrPaths));
+
+    auto newMetaPaths = llvm::to_vector(P4HIR::FieldPath(newMetaType).children());
+
+    // Map original header metadata paths to the new flattened ones.
+    if (!hdrsMetaPaths.empty()) {
+        P4HIR::FieldPath newHdrsMetaPath = newMetaPaths.pop_back_val();
+        auto newHdrsMetaPaths = llvm::to_vector(newHdrsMetaPath.children());
+        hdrsSource.addMappings(hdrsMetaPaths, newMetaTarget.locs(newHdrsMetaPaths));
+    }
+
+    // Map original metadata.
+    auto metaPaths = llvm::to_vector(P4HIR::FieldPath(metaType).children());
+    metaSource.addMappings(metaPaths, newMetaTarget.locs(newMetaPaths));
+
+    LLVM_DEBUG({
+        llvm::dbgs() << "Mapping:\n";
+        mapping.dump();
+    });
+
+    auto maybeNewArgs = IRUtils::duplicateFunctionLikeArgs(
+        object, {hdrsArg, metaArg},
+        {P4HIR::ReferenceType::get(newHdrsType), P4HIR::ReferenceType::get(newMetaType)});
+    if (failed(maybeNewArgs)) return mlir::failure();
+
+    auto newHdrsArg = (*maybeNewArgs)[0];
+    auto newMetaArg = (*maybeNewArgs)[1];
+
+    // Transform the arguments using the built location mapping.
+    mlir::IRRewriter rewriter(ctx);
+    IRUtils::P4HIRLocationRewriter lr(rewriter, mapping, {hdrsArg, metaArg},
+                                      {newHdrsArg, newMetaArg});
+    if (failed(lr.transform())) return mlir::failure();
+
+    if (failed(IRUtils::eraseFunctionLikeArgs(object, {hdrsArg, metaArg}))) return mlir::failure();
+
+    return mlir::success();
+}
+#if 0
 mlir::LogicalResult makeHeadersToplevel(mlir::FunctionOpInterface object,
                                         mlir::BlockArgument hdrsArg, mlir::BlockArgument metaArg) {
     auto *ctx = object.getContext();
@@ -152,12 +259,15 @@ mlir::LogicalResult makeHeadersToplevel(mlir::FunctionOpInterface object,
 
     return mlir::success();
 }
-
+#endif
 void MakeHeadersToplevelPass::runOnOperation() {
     auto obj = getOperation();
-    if (failed(makeHeadersToplevel(obj, obj.getArguments()[hdrsArgIdx],
-                                   obj.getArguments()[metaArgIdx])))
+    if (failed(makeHeadersToplevel2(obj, obj.getArguments()[hdrsArgIdx],
+                                    obj.getArguments()[metaArgIdx])))
         signalPassFailure();
+    // if (failed(makeHeadersToplevel(obj, obj.getArguments()[hdrsArgIdx],
+    //                                obj.getArguments()[metaArgIdx])))
+    //     signalPassFailure();
 }
 
 std::unique_ptr<Pass> createMakeHeadersToplevelPass() {
