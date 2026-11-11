@@ -5,6 +5,7 @@
 #ifndef P4MLIR_DIALECT_P4HIR_P4HIR_FIELDPATH_H
 #define P4MLIR_DIALECT_P4HIR_P4HIR_FIELDPATH_H
 
+#include "mlir/IR/Diagnostics.h"
 #include "p4mlir/Dialect/P4HIR/P4HIR_TypeInterfaces.h"
 
 namespace P4::P4MLIR::P4HIR {
@@ -324,14 +325,18 @@ struct FieldPath {
     /// Iterate all paths for direct subfields of the leaf type of this path.
     /// If the leaf type has no sunfields an empty range is returned.
     auto children() const {
-        auto itype = mlir::dyn_cast<P4HIR::IndexableTypeInterface>(getType());
-        unsigned count = itype ? itype.getFieldCount() : 0u;
-        return llvm::map_range(llvm::seq(0u, count),
+        return llvm::map_range(llvm::seq(0u, getChildrenCount()),
                                [this](unsigned index) { return (*this)[index]; });
     }
 
-    /// Returns true if leaf type of this path has subfields.
-    bool hasChildren() const { return mlir::isa<P4HIR::IndexableTypeInterface>(getType()); }
+    /// Return the number of subfields for the leaf type of this path.
+    unsigned getChildrenCount() const {
+        auto itype = mlir::dyn_cast<P4HIR::IndexableTypeInterface>(getType());
+        return itype ? itype.getFieldCount() : 0u;
+    }
+
+    /// Returns true if the leaf type of this path has subfields.
+    bool hasChildren() const { return getChildrenCount() > 0; }
 
     /// Create a new path by appending the field indices of this path on top of `newRootType`.
     FieldPath withRoot(mlir::Type newRootType) const;
@@ -359,6 +364,11 @@ struct FieldPath {
 inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const FieldPath &path) {
     path.print(os);
     return os;
+}
+
+inline mlir::Diagnostic &operator<<(mlir::Diagnostic &diag, const FieldPath &path) {
+    diag << "'" << path.str() << "'";
+    return diag;
 }
 
 }  // namespace P4::P4MLIR::P4HIR
